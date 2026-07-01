@@ -1,0 +1,18 @@
+{
+  "name": "kai-plugin-msgraph",
+  "version": "0.1.0",
+  "author": "Kyle Boyer <https://github.com/KyleBoyer>",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --dev --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "esbuild": "0.28.1",
+    "typescript": "^5.7.0"
+  }
+}

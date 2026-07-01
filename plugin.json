@@ -1,0 +1,72 @@
+{
+  "name": "msgraph",
+  "displayName": "Teams",
+  "version": "0.1.0",
+  "description": "Microsoft Teams chat via Graph API — list, search, read, and send DMs and group chats with AI tooling",
+  "icon": {
+    "lucide": "message-square-more"
+  },
+  "author": "Kyle Boyer <https://github.com/KyleBoyer>",
+  "permissions": [
+    "config:read",
+    "config:write",
+    "state:publish",
+    "tools:register",
+    "ui:panel",
+    "ui:navigation",
+    "ui:settings",
+    "notifications:send",
+    "auth:window",
+    "safe-storage",
+    "network:fetch",
+    "navigation:open"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "preferences": {
+        "type": "object",
+        "properties": {
+          "notifications": {
+            "type": "boolean",
+            "default": true,
+            "description": "Show desktop notifications for new messages while the panel is open"
+          },
+          "pollIntervalSeconds": {
+            "type": "number",
+            "default": 30,
+            "description": "How often to refresh the chat list in the panel"
+          },
+          "debugLogging": {
+            "type": "boolean",
+            "default": false,
+            "description": "Write verbose debug logs to ~/.kai/plugin-logs/msgraph/"
+          }
+        }
+      },
+      "toolPermissions": {
+        "type": "object",
+        "description": "Enable/disable individual AI tools",
+        "properties": {
+          "authStatus": { "type": "boolean", "default": true },
+          "findUser": { "type": "boolean", "default": true },
+          "listChats": { "type": "boolean", "default": true },
+          "getChatMessages": { "type": "boolean", "default": true },
+          "searchMessages": { "type": "boolean", "default": true },
+          "sendMessage": { "type": "boolean", "default": true },
+          "sendDm": { "type": "boolean", "default": true },
+          "reactToMessage": { "type": "boolean", "default": true },
+          "createGroupChat": { "type": "boolean", "default": true }
+        }
+      },
+      "graphToken": {
+        "type": "object",
+        "description": "Cached OAuth token set (managed by the plugin)"
+      },
+      "encryptedCredentials": {
+        "type": "object",
+        "description": "Encrypted auto-login credentials (managed by the plugin)"
+      }
+    }
+  }
+}
