@@ -1,12 +1,15 @@
 import React, { useMemo, useState, useEffect, useRef, useLayoutEffect } from 'react';
 import type { PluginComponentProps } from '../hooks.ts';
 import { usePanelHeight } from '../hooks.ts';
-import type { MsgraphPluginState, NormalizedChat, NormalizedMessage, Presence } from '../../shared/types.ts';
+import type { MsgraphPluginState, NormalizedChat, NormalizedMessage, Presence, BodySegment } from '../../shared/types.ts';
 import { MfaDialog } from './MfaDialog.tsx';
 import { MfaApprovalDialog } from './MfaApprovalDialog.tsx';
 import { Avatar, AvatarStack } from './Avatar.tsx';
 import { ReactionPicker } from './ReactionPicker.tsx';
 import { SelfMenu } from './SelfMenu.tsx';
+import { NewChatDialog } from './NewChatDialog.tsx';
+import { UserCard } from './UserCard.tsx';
+import { RichComposer } from '../editor/RichComposer.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
@@ -32,9 +35,11 @@ export function PanelView({ pluginState, onAction }: Props) {
   const presence = s.presence ?? {};
   const hostedContents = s.hostedContents ?? {};
   const [filter, setFilter] = useState('');
-  const [draft, setDraft] = useState('');
+  const [searchMode, setSearchMode] = useState<'people' | 'content'>('people');
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const [reactionTarget, setReactionTarget] = useState<string | null>(null);
   const [selfMenuOpen, setSelfMenuOpen] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -55,11 +60,15 @@ export function PanelView({ pluginState, onAction }: Props) {
 
   const remote = s.remoteSearch;
   const chats = useMemo(() => {
-    if (!filter.trim()) return localMatches;
-    const seen = new Set(localMatches.map((c) => c.id));
-    const extra = (remote?.query === filter.trim() ? remote.results : []).filter((c) => !seen.has(c.id));
-    return [...localMatches, ...extra];
-  }, [localMatches, remote, filter]);
+    let list = localMatches;
+    if (filter.trim()) {
+      const seen = new Set(localMatches.map((c) => c.id));
+      const extra = (remote?.query === filter.trim() ? remote.results : []).filter((c) => !seen.has(c.id));
+      list = [...localMatches, ...extra];
+    }
+    if (unreadOnly) list = list.filter((c) => c.unread);
+    return list;
+  }, [localMatches, remote, filter, unreadOnly]);
 
   // Debounced remote search when the local filter is sparse.
   useEffect(() => {
@@ -70,12 +79,12 @@ export function PanelView({ pluginState, onAction }: Props) {
       return;
     }
     searchDebounce.current = setTimeout(() => {
-      onAction('search-chats', { query: q });
+      onAction('search-chats', { query: q, mode: searchMode });
     }, 350);
     return () => {
       if (searchDebounce.current) clearTimeout(searchDebounce.current);
     };
-  }, [filter]);
+  }, [filter, searchMode]);
 
   const activeChat = useMemo(
     () => (s.chats ?? []).find((ch) => ch.id === s.activeChatId) ?? null,
@@ -112,13 +121,6 @@ export function PanelView({ pluginState, onAction }: Props) {
     const el = scrollRef.current;
     if (!el) return;
     stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
-
-  const send = () => {
-    if (!draft.trim() || !s.activeChatId) return;
-    stickToBottomRef.current = true;
-    onAction('send-message', { chatId: s.activeChatId, text: draft.trim() });
-    setDraft('');
   };
 
   const react = (messageId: string, reactionType: string, remove = false) => {
@@ -187,6 +189,16 @@ export function PanelView({ pluginState, onAction }: Props) {
           <h2 className="text-sm font-semibold text-foreground">Teams</h2>
           <button
             type="button"
+            title="New chat"
+            onClick={() => setNewChatOpen(true)}
+            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+            </svg>
+          </button>
+          <button
+            type="button"
             title="Refresh"
             onClick={() => onAction('refresh-chats')}
             className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
@@ -248,12 +260,52 @@ export function PanelView({ pluginState, onAction }: Props) {
       {/* Sidebar */}
       <div className="flex w-[280px] min-w-[220px] flex-col border-r border-border/50 min-h-0">
         <div className="px-3 pt-3 pb-2 shrink-0">
-          <input
-            className="w-full px-2.5 py-1.5 text-xs bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:border-primary transition-colors"
-            placeholder="Filter chats…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
+          <div className="flex items-center gap-1.5 mb-2">
+            <button
+              type="button"
+              onClick={() => setUnreadOnly(false)}
+              className={`px-2 py-0.5 rounded-full text-[11px] transition-colors ${
+                !unreadOnly ? 'bg-primary/15 text-primary font-medium' : 'text-muted-foreground hover:bg-muted'
+              }`}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              onClick={() => setUnreadOnly(true)}
+              className={`px-2 py-0.5 rounded-full text-[11px] transition-colors ${
+                unreadOnly ? 'bg-primary/15 text-primary font-medium' : 'text-muted-foreground hover:bg-muted'
+              }`}
+            >
+              Unread
+            </button>
+          </div>
+          <div className="relative">
+            <input
+              style={{ paddingLeft: 12, paddingRight: 32, paddingTop: 6, paddingBottom: 6 }}
+              className="w-full text-xs bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:border-primary transition-colors"
+              placeholder={searchMode === 'people' ? 'Search people & chats…' : 'Search in messages…'}
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            <button
+              type="button"
+              title={searchMode === 'people' ? 'Searching by person — click for content search' : 'Searching in message content — click for people search'}
+              onClick={() => setSearchMode((m) => (m === 'people' ? 'content' : 'people'))}
+              style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)' }}
+              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-background/60 transition-colors"
+            >
+              {searchMode === 'people' ? (
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+              ) : (
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M8 9h8M8 13h5" />
+                </svg>
+              )}
+            </button>
+          </div>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-1.5 pb-2">
           {s.loadingChats && chats.length === 0 && (
@@ -353,6 +405,7 @@ export function PanelView({ pluginState, onAction }: Props) {
                   onClosePicker={() => setReactionTarget(null)}
                   onReact={(type, remove) => react(m.id, type, remove)}
                   onContentResize={scrollToBottomIfSticky}
+                  onMentionClick={(userId) => onAction('load-user-card', { userId })}
                 />
               ))}
             </div>
@@ -363,35 +416,36 @@ export function PanelView({ pluginState, onAction }: Props) {
               </div>
             )}
 
-            <div className="flex items-end gap-2 border-t border-border/50 p-3 shrink-0">
-              <textarea
-                className="flex-1 resize-none px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:border-primary transition-colors max-h-32"
-                rows={1}
-                placeholder="Message…"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    send();
-                  }
-                }}
-              />
-              <button
-                type="button"
-                disabled={!draft.trim() || s.sendingMessage}
-                onClick={send}
-                className="px-3.5 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
-              >
-                {s.sendingMessage ? '…' : 'Send'}
-              </button>
-            </div>
+            <RichComposer
+              chatId={s.activeChatId ?? ''}
+              sending={!!s.sendingMessage}
+              onSend={(payload) => {
+                if (!s.activeChatId) return;
+                stickToBottomRef.current = true;
+                onAction('send-message', { chatId: s.activeChatId, payload });
+              }}
+              onSearchPeople={(q) => onAction('search-people', { query: q })}
+              peopleSearch={s.peopleSearch ?? null}
+              photos={photos}
+              presence={presence}
+            />
           </>
         )}
       </div>
 
       </div>
 
+      {s.userCard && (
+        <UserCard state={s} photos={photos} presence={presence} onAction={onAction} />
+      )}
+      {newChatOpen && (
+        <NewChatDialog
+          state={s}
+          photos={photos}
+          onAction={onAction}
+          onClose={() => setNewChatOpen(false)}
+        />
+      )}
       {mfa.needed && mfa.type === 'push' && <MfaApprovalDialog approvalNumber={mfa.approvalNumber} />}
       {mfa.needed && (mfa.type === 'sms' || mfa.type === 'totp') && (
         <MfaDialog
@@ -401,6 +455,105 @@ export function PanelView({ pluginState, onAction }: Props) {
         />
       )}
     </div>
+  );
+}
+
+function Segments({
+  segments,
+  fromMe,
+  onMentionClick,
+}: {
+  segments: BodySegment[];
+  fromMe: boolean;
+  onMentionClick: (userId: string) => void;
+}) {
+  return (
+    <>
+      {segments.map((seg, i) => {
+        if (seg.type === 'text') return <span key={i}>{seg.text}</span>;
+        if (seg.type === 'br') return <br key={i} />;
+        if (seg.type === 'mention') {
+          return (
+            <button
+              key={i}
+              type="button"
+              onClick={() => seg.userId && onMentionClick(seg.userId)}
+              disabled={!seg.userId}
+              style={{
+                color: fromMe ? undefined : '#2563eb',
+                textDecoration: 'underline',
+                textDecorationColor: fromMe ? 'currentColor' : 'rgba(37,99,235,0.4)',
+                textUnderlineOffset: 2,
+                cursor: seg.userId ? 'pointer' : 'default',
+              }}
+              className={`inline font-medium hover:opacity-80 transition-opacity ${
+                fromMe ? 'text-primary-foreground' : ''
+              }`}
+            >
+              {seg.displayName}
+            </button>
+          );
+        }
+        if (seg.type === 'code') {
+          return (
+            <code
+              key={i}
+              style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '0.85em' }}
+              className={`px-1 py-0.5 rounded ${fromMe ? 'bg-primary-foreground/20' : 'bg-background/60 border border-border/60'}`}
+            >
+              {seg.code}
+            </code>
+          );
+        }
+        if (seg.type === 'codeblock') {
+          const lines = seg.code.split('\n');
+          return (
+            <div
+              key={i}
+              className="my-1.5 rounded-lg border border-border bg-card text-foreground overflow-hidden"
+              style={{ whiteSpace: 'normal' }}
+            >
+              <div className="flex items-center justify-between px-2.5 py-1 border-b border-border/60 bg-muted/40">
+                <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {seg.lang ?? 'code'}
+                </span>
+                <button
+                  type="button"
+                  title="Copy"
+                  onClick={() => navigator.clipboard?.writeText(seg.code)}
+                  className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                </button>
+              </div>
+              <div
+                style={{
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  fontSize: '0.8em',
+                  maxHeight: 320,
+                }}
+                className="overflow-auto"
+              >
+                {lines.map((ln, li) => (
+                  <div key={li} className="flex">
+                    <span
+                      style={{ minWidth: 32, userSelect: 'none' }}
+                      className="text-right pr-2 text-muted-foreground/60 shrink-0"
+                    >
+                      {li + 1}
+                    </span>
+                    <span style={{ whiteSpace: 'pre' }} className="pr-3">{ln || ' '}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        }
+        return null;
+      })}
+    </>
   );
 }
 
@@ -467,6 +620,7 @@ function MessageBubble({
   onClosePicker,
   onReact,
   onContentResize,
+  onMentionClick,
 }: {
   m: NormalizedMessage;
   photos: Record<string, string | null>;
@@ -477,14 +631,17 @@ function MessageBubble({
   onClosePicker: () => void;
   onReact: (type: string, remove?: boolean) => void;
   onContentResize: () => void;
+  onMentionClick: (userId: string) => void;
 }) {
   const [hover, setHover] = useState(false);
-  const hasContent = !!m.text || m.hostedImages.length > 0 || m.attachments.length > 0 || !!m.replyTo;
-  const imageOnly = !m.text && !m.replyTo && m.hostedImages.length > 0;
+  const hasBody = m.segments.length > 0;
+  const hasContent = hasBody || m.hostedImages.length > 0 || m.attachments.length > 0 || !!m.replyTo;
+  const imageOnly = !hasBody && !m.replyTo && m.hostedImages.length > 0;
 
   return (
     <div
-      className={`group flex gap-2 ${m.fromMe ? 'flex-row-reverse' : ''}`}
+      className="group flex gap-2"
+      style={{ flexDirection: m.fromMe ? 'row-reverse' : 'row' }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
@@ -493,7 +650,10 @@ function MessageBubble({
           <Avatar id={m.fromId} name={m.fromName ?? '?'} photo={photos[m.fromId]} size={7} />
         )}
       </div>
-      <div className={`relative flex flex-col max-w-[75%] ${m.fromMe ? 'items-end' : 'items-start'}`}>
+      <div
+        className="relative flex flex-col"
+        style={{ maxWidth: '75%', alignItems: m.fromMe ? 'flex-end' : 'flex-start' }}
+      >
         {showHeader && !m.fromMe && m.fromName && (
           <div className="text-[10px] font-medium text-muted-foreground px-1 mb-0.5">{m.fromName}</div>
         )}
@@ -526,9 +686,9 @@ function MessageBubble({
               </div>
             </div>
           )}
-          {m.text}
+          {hasBody && <Segments segments={m.segments} fromMe={m.fromMe} onMentionClick={onMentionClick} />}
           {m.hostedImages.length > 0 && (
-            <div className={`flex flex-col gap-1 ${m.text ? 'mt-1.5' : ''}`}>
+            <div className={`flex flex-col gap-1 ${hasBody ? 'mt-1.5' : ''}`}>
               {m.hostedImages.map((u) => {
                 const data = hostedContents[u];
                 if (data) {

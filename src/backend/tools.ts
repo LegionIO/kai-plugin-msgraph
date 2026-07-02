@@ -1,6 +1,7 @@
 import type { PluginAPI, GraphUser, GraphChatType } from '../shared/types.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
+import { buildMessageBody } from '../shared/markdown.js';
 import { getLogger } from './logger-singleton.js';
 
 export type ToolDefinition = {
@@ -218,11 +219,15 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
         type: 'object',
         properties: {
           chatId: { type: 'string' },
-          text: { type: 'string', description: 'Message body.' },
+          text: {
+            type: 'string',
+            description:
+              'Message body. Markdown (**bold**, *italic*, `code`, ```fenced blocks```) is auto-converted to Teams HTML unless contentType is set explicitly.',
+          },
           contentType: {
             type: 'string',
             enum: ['text', 'html'],
-            description: 'Body content type. Default text.',
+            description: 'Force a specific body content type. Omit to auto-detect markdown.',
           },
         },
         required: ['chatId', 'text'],
@@ -236,7 +241,9 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             text: string;
             contentType?: 'text' | 'html';
           };
-          const m = await client.sendMessage(chatId, text, contentType ?? 'text');
+          const m = contentType
+            ? await client.sendMessage(chatId, text, contentType)
+            : await client.sendMessageRaw(chatId, buildMessageBody(text));
           return {
             success: true,
             chatId,
@@ -277,7 +284,9 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           };
           const user = await resolveUser(client, to);
           const chat = await client.getOrCreateOneOnOne(user.id);
-          const m = await client.sendMessage(chat.id, text, contentType ?? 'text');
+          const m = contentType
+            ? await client.sendMessage(chat.id, text, contentType)
+            : await client.sendMessageRaw(chat.id, buildMessageBody(text));
           return {
             success: true,
             recipient: {

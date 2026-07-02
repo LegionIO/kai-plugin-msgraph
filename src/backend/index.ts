@@ -12,6 +12,7 @@ import * as photoCache from './photo-cache.js';
 import * as presenceCache from './presence-cache.js';
 import * as hostedContentCache from './hosted-content-cache.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
+import { buildMessageBody, type PendingImage } from '../shared/markdown.js';
 import { buildMsgraphTools, ALL_TOOL_NAMES } from './tools.js';
 import { setLogger, getLogger } from './logger-singleton.js';
 import {
@@ -37,6 +38,12 @@ let hadValidTokenSinceLogout = false;
 let messageLoadSeq = 0;
 let remoteSearchSeq = 0;
 let meJobTitle: string | null = null;
+let paginationInFlight = false;
+const MAX_CHAT_PAGES = 20;
+
+const peopleSearchCache = new Map<string, { at: number; results: Array<{ id: string; displayName: string; email: string | null }> }>();
+const PEOPLE_CACHE_TTL_MS = 5 * 60_000;
+const PEOPLE_CACHE_MAX = 200;
 
 // ── Config helpers ──
 
@@ -76,8 +83,11 @@ function initialState(): MsgraphPluginState {
     hostedContents: {},
     chats: [],
     chatsNextLink: null,
+    chatsFullyLoaded: false,
     loadingMoreChats: false,
     remoteSearch: null,
+    peopleSearch: null,
+    userCard: null,
     activeChatId: null,
     activeChatMessages: [],
     loadingChats: false,
@@ -176,15 +186,57 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
     const { chats: raw, nextLink } = await client.listChats({});
     if (session !== tokenCache.currentSession()) return;
     const myId = tokenCache.getObjectId();
-    const chats = raw.map((c) => normalizeChat(c, myId));
-    api.state.set('chats', chats);
+    const page1 = raw.map((c) => normalizeChat(c, myId));
+    const prev = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
+    // Preserve already-loaded tail so a periodic refresh of page 1 doesn't shrink the list.
+    const p1Ids = new Set(page1.map((c) => c.id));
+    const merged = [...page1, ...prev.filter((c) => !p1Ids.has(c.id))];
+    api.state.set('chats', merged);
     api.state.set('chatsNextLink', nextLink);
     updateNavBadge(api);
     const ids = new Set<string>();
     if (myId) ids.add(myId);
-    for (const c of chats) for (const m of c.members) ids.add(m.id);
+    for (const c of page1) for (const m of c.members) ids.add(m.id);
     photoCache.ensure(api, client, ids);
     presenceCache.refresh(api, client, ids);
+
+    // Background: page to the end (once) so member-based search is complete.
+    if (
+      nextLink &&
+      !paginationInFlight &&
+      !(api.state.get() as Partial<MsgraphPluginState>).chatsFullyLoaded
+    ) {
+      paginationInFlight = true;
+      void (async () => {
+        try {
+          let link: string | null = nextLink;
+          let pages = 1;
+          while (link && pages < MAX_CHAT_PAGES) {
+            if (session !== tokenCache.currentSession()) return;
+            await new Promise((r) => setTimeout(r, 60));
+            const { chats: more, nextLink: nl } = await client.listChatsPage(link);
+            if (session !== tokenCache.currentSession()) return;
+            const cur = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
+            const seen = new Set(cur.map((c) => c.id));
+            const add = more.map((c) => normalizeChat(c, myId)).filter((c) => !seen.has(c.id));
+            if (add.length) api.state.set('chats', [...cur, ...add]);
+            api.state.set('chatsNextLink', nl);
+            link = nl;
+            pages++;
+          }
+          if (session === tokenCache.currentSession()) {
+            api.state.set('chatsFullyLoaded', !link);
+            updateNavBadge(api);
+          }
+        } catch (err) {
+          getLogger().warn(`background chat pagination stopped: ${err}`);
+        } finally {
+          paginationInFlight = false;
+        }
+      })();
+    } else if (!nextLink) {
+      api.state.set('chatsFullyLoaded', true);
+    }
   } catch (err) {
     if (session === tokenCache.currentSession()) {
       api.state.set('error', err instanceof Error ? err.message : String(err));
@@ -256,6 +308,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         photoCache.clear();
         presenceCache.clear();
         hostedContentCache.clear();
+        peopleSearchCache.clear();
         hadValidTokenSinceLogout = false;
         api.state.replace(initialState() as unknown as Record<string, unknown>);
         publishCredentialState(api);
@@ -293,7 +346,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         break;
       }
       case 'search-chats': {
-        const { query } = data as { query: string };
+        const { query, mode = 'people' } = data as { query: string; mode?: 'people' | 'content' };
         const q = query.trim();
         const seq = ++remoteSearchSeq;
         if (q.length < 2) {
@@ -304,28 +357,49 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         try {
           const client = await ensureAuthenticated(api, false);
           const myId = tokenCache.getObjectId();
-          let users: import('../shared/types.js').GraphUser[] = [];
-          if (q.includes('@')) {
-            const u = await client.getUserByEmail(q);
-            if (u) users = [u];
-          }
-          if (users.length === 0) {
-            try {
-              users = await client.searchPeople(q, 10);
-            } catch (err) {
-              log.warn(`searchPeople failed (${err}); falling back to /users`);
+          const isChatId = (id: string) => /@(unq\.gbl\.spaces|thread\.v2)$/i.test(id);
+          const chatIdsToFetch = async (kql: string, top: number) => {
+            const hits = await client.searchMessages(kql, top);
+            return [...new Set(hits.map((h) => h.chatId).filter((id): id is string => !!id && isChatId(id)))];
+          };
+
+          let rawChats: import('../shared/types.js').GraphChat[] = [];
+
+          if (mode === 'content') {
+            const ids = (await chatIdsToFetch(q, 50).catch((e) => {
+              log.warn(`content search failed: ${e}`);
+              return [] as string[];
+            })).slice(0, 12);
+            const fetched = await Promise.allSettled(ids.map((id) => client.getChat(id)));
+            rawChats = fetched.flatMap((p) => (p.status === 'fulfilled' ? [p.value] : []));
+          } else {
+            // People mode: resolve people → probe existing 1:1s. Group-chat membership
+            // matches come from the local filter over the (background-)fully-loaded list.
+            let users: import('../shared/types.js').GraphUser[] = [];
+            if (q.includes('@')) {
+              const u = await client.getUserByEmail(q);
+              if (u) users = [u];
             }
+            if (users.length === 0) {
+              try {
+                users = await client.searchPeople(q, 10);
+              } catch (err) {
+                log.warn(`searchPeople failed (${err}); falling back to /users`);
+              }
+            }
+            if (users.length === 0) users = await client.findUsers(q, 25);
+            if (seq !== remoteSearchSeq) return;
+            const rs = await Promise.allSettled(
+              users.filter((u) => u.id && u.id !== myId).map((u) => client.probeOneOnOne(u.id)),
+            );
+            rawChats = rs.flatMap((p) => (p.status === 'fulfilled' && p.value ? [p.value] : []));
           }
-          if (users.length === 0) {
-            users = await client.findUsers(q, 25);
-          }
+
           if (seq !== remoteSearchSeq) return;
-          const probes = await Promise.allSettled(
-            users.filter((u) => u.id && u.id !== myId).map((u) => client.probeOneOnOne(u.id)),
-          );
-          if (seq !== remoteSearchSeq) return;
-          const results = probes
-            .flatMap((p) => (p.status === 'fulfilled' && p.value ? [normalizeChat(p.value, myId)] : []))
+          const seen = new Set<string>();
+          const results = rawChats
+            .map((c) => normalizeChat(c, myId))
+            .filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)))
             .sort((a, b) => (b.lastUpdated ?? '').localeCompare(a.lastUpdated ?? ''));
           api.state.set('remoteSearch', { query: q, loading: false, results });
           const ids = new Set<string>();
@@ -364,16 +438,145 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         break;
       }
       case 'send-message': {
-        const { chatId, text } = data as { chatId: string; text: string };
+        const { chatId, text, images, payload } = data as {
+          chatId: string;
+          text?: string;
+          images?: PendingImage[];
+          payload?: Record<string, unknown>;
+        };
         api.state.set('sendingMessage', true);
         try {
           const client = await ensureAuthenticated(api);
-          await client.sendMessage(chatId, text);
+          const body = payload ?? buildMessageBody(text ?? '', images ?? []);
+          await client.sendMessageRaw(chatId, body);
           if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
             await loadMessages(api, chatId);
           }
         } finally {
           api.state.set('sendingMessage', false);
+        }
+        break;
+      }
+      case 'compose-new-chat': {
+        const { recipients, topic, text, images } = data as {
+          recipients: Array<{ id: string; displayName?: string }>;
+          topic?: string;
+          text?: string;
+          images?: PendingImage[];
+        };
+        const client = await ensureAuthenticated(api);
+        const myId = tokenCache.getObjectId();
+        const ids = [...new Set(recipients.map((r) => r.id).filter((id) => id && id !== myId))];
+        if (ids.length === 0) throw new Error('Select at least one recipient');
+
+        let chatId: string;
+        if (ids.length === 1) {
+          const chat = await client.getOrCreateOneOnOne(ids[0]);
+          chatId = chat.id;
+        } else {
+          // Reuse an existing untitled group with exactly these members if one is already loaded.
+          const want = new Set(ids);
+          const existing = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []).find(
+            (c) =>
+              c.type === 'group' &&
+              !c.topic &&
+              c.members.length === want.size &&
+              c.members.every((m) => want.has(m.id)),
+          );
+          if (existing && !topic) {
+            chatId = existing.id;
+          } else {
+            const chat = await client.createGroupChat(topic || null, ids);
+            chatId = chat.id;
+          }
+        }
+
+        if ((text && text.trim()) || (images && images.length)) {
+          const payload = buildMessageBody(text ?? '', images ?? []);
+          await client.sendMessageRaw(chatId, payload);
+        }
+        await loadChats(api, false);
+        await loadMessages(api, chatId);
+        break;
+      }
+      case 'load-user-card': {
+        const { userId } = data as { userId: string };
+        api.state.set('userCard', { userId, loading: true, displayName: null, email: null, jobTitle: null });
+        try {
+          const client = await ensureAuthenticated(api, false);
+          const u = await client.getUser(userId);
+          if ((api.state.get() as Partial<MsgraphPluginState>).userCard?.userId !== userId) break;
+          api.state.set('userCard', {
+            userId,
+            loading: false,
+            displayName: u.displayName ?? null,
+            email: u.mail ?? u.userPrincipalName ?? null,
+            jobTitle: u.jobTitle ?? null,
+          });
+          photoCache.ensure(api, client, [userId]);
+          presenceCache.refresh(api, client, [userId]);
+        } catch (err) {
+          if ((api.state.get() as Partial<MsgraphPluginState>).userCard?.userId === userId) {
+            api.state.set('userCard', {
+              userId, loading: false, displayName: null, email: null, jobTitle: null,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        break;
+      }
+      case 'close-user-card': {
+        api.state.set('userCard', null);
+        break;
+      }
+      case 'open-chat-with': {
+        const { userId } = data as { userId: string };
+        const client = await ensureAuthenticated(api);
+        const chat = await client.getOrCreateOneOnOne(userId);
+        api.state.set('userCard', null);
+        await loadMessages(api, chat.id);
+        void loadChats(api, false);
+        break;
+      }
+      case 'search-people': {
+        const { query } = data as { query: string };
+        const q = query.trim();
+        if (q.length < 1) {
+          api.state.set('peopleSearch', { query: q, loading: false, results: [] });
+          break;
+        }
+        const cacheKey = q.toLowerCase();
+        const cached = peopleSearchCache.get(cacheKey);
+        if (cached && Date.now() - cached.at < PEOPLE_CACHE_TTL_MS) {
+          api.state.set('peopleSearch', { query: q, loading: false, results: cached.results });
+          break;
+        }
+        api.state.set('peopleSearch', { query: q, loading: true, results: [] });
+        try {
+          const client = await ensureAuthenticated(api, false);
+          let results = q.includes('@')
+            ? await client.getUserByEmail(q).then((u) => (u ? [u] : []))
+            : await client.searchPeople(q, 8);
+          if (results.length === 0) results = await client.findUsers(q, 8);
+          const mapped = results.map((u) => ({
+            id: u.id,
+            displayName: u.displayName ?? u.userPrincipalName ?? u.id,
+            email: u.mail ?? u.userPrincipalName ?? null,
+          }));
+          if (peopleSearchCache.size >= PEOPLE_CACHE_MAX) {
+            const oldest = peopleSearchCache.keys().next().value;
+            if (oldest) peopleSearchCache.delete(oldest);
+          }
+          peopleSearchCache.set(cacheKey, { at: Date.now(), results: mapped });
+          api.state.set('peopleSearch', { query: q, loading: false, results: mapped });
+          photoCache.ensure(api, client, results.map((u) => u.id));
+        } catch (err) {
+          api.state.set('peopleSearch', {
+            query: q,
+            loading: false,
+            results: [],
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
         break;
       }

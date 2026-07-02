@@ -31,10 +31,45 @@ const reactGlobalPlugin = {
       path: args.path,
       namespace: 'react-global',
     }));
-    build.onLoad({ filter: /.*/, namespace: 'react-global' }, () => ({
-      contents: `
+    build.onLoad({ filter: /.*/, namespace: 'react-global' }, (args) => ({
+      contents: args.path.includes('jsx-runtime') || args.path.includes('jsx-dev-runtime')
+        ? `
         const R = () => globalThis.React;
-        export default new Proxy({}, { get: (_, k) => R()[k] });
+        export const Fragment = Symbol.for('react.fragment');
+        export function jsx(type, props, key) {
+          return R().createElement(type, key !== undefined ? { ...props, key } : props);
+        }
+        export const jsxs = jsx;
+        export const jsxDEV = jsx;
+        `
+        : args.path.startsWith('react-dom')
+        ? `
+        const RD = () => globalThis.ReactDOM ?? {};
+        // Fallback portal: render in place if host doesn't expose ReactDOM.
+        export const createPortal = (children, _container) =>
+          (RD().createPortal ? RD().createPortal(children, _container) : children);
+        export const flushSync = (fn) => (RD().flushSync ? RD().flushSync(fn) : fn());
+        export default new Proxy({}, { get: (_, k) => RD()[k] });
+        `
+        : `
+        const R = () => globalThis.React;
+        // Self-contained base classes so 'class X extends React.Component' can evaluate
+        // before Kai calls register({React}). React's reconciler only checks
+        // prototype.isReactComponent / isPureReactComponent — the runtime updater is
+        // injected onto the instance by React itself.
+        const noopUpdater = { isMounted: () => false, enqueueSetState() {}, enqueueReplaceState() {}, enqueueForceUpdate() {} };
+        export function Component(props, context, updater) {
+          this.props = props; this.context = context; this.refs = {};
+          this.updater = updater || noopUpdater;
+        }
+        Component.prototype.isReactComponent = {};
+        Component.prototype.setState = function (s, cb) { this.updater.enqueueSetState(this, s, cb, 'setState'); };
+        Component.prototype.forceUpdate = function (cb) { this.updater.enqueueForceUpdate(this, cb, 'forceUpdate'); };
+        export function PureComponent(props, context, updater) { Component.call(this, props, context, updater); }
+        PureComponent.prototype = Object.create(Component.prototype);
+        PureComponent.prototype.constructor = PureComponent;
+        PureComponent.prototype.isPureReactComponent = true;
+        export default new Proxy({}, { get: (_, k) => (k === 'Component' ? Component : k === 'PureComponent' ? PureComponent : R()?.[k]) });
         export const useState = (...a) => R().useState(...a);
         export const useEffect = (...a) => R().useEffect(...a);
         export const useLayoutEffect = (...a) => R().useLayoutEffect(...a);
@@ -43,12 +78,24 @@ const reactGlobalPlugin = {
         export const useMemo = (...a) => R().useMemo(...a);
         export const useContext = (...a) => R().useContext(...a);
         export const useReducer = (...a) => R().useReducer(...a);
+        export const useId = (...a) => R().useId(...a);
+        export const useSyncExternalStore = (...a) => R().useSyncExternalStore(...a);
+        export const useDeferredValue = (...a) => R().useDeferredValue(...a);
+        export const useTransition = (...a) => R().useTransition(...a);
+        export const useImperativeHandle = (...a) => R().useImperativeHandle(...a);
+        export const useInsertionEffect = (...a) => (R().useInsertionEffect ?? R().useLayoutEffect)(...a);
+        export const useDebugValue = () => {};
+        export const startTransition = (fn) => (R().startTransition ? R().startTransition(fn) : fn());
         export const createElement = (...a) => R().createElement(...a);
+        export const cloneElement = (...a) => R().cloneElement(...a);
         export const createContext = (...a) => R().createContext(...a);
         export const forwardRef = (...a) => R().forwardRef(...a);
         export const memo = (...a) => R().memo(...a);
+        export const isValidElement = (...a) => R().isValidElement(...a);
+        export const Children = new Proxy({}, { get: (_, k) => R().Children[k] });
         export const Fragment = Symbol.for('react.fragment');
-      `,
+        export const Suspense = Symbol.for('react.suspense');
+        `,
       loader: 'js',
     }));
   },

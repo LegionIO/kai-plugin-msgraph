@@ -125,6 +125,13 @@ export interface NormalizedReaction {
   users: string[];
 }
 
+export type BodySegment =
+  | { type: 'text'; text: string }
+  | { type: 'br' }
+  | { type: 'mention'; userId: string | null; displayName: string }
+  | { type: 'code'; code: string }
+  | { type: 'codeblock'; code: string; lang: string | null };
+
 export interface NormalizedMessage {
   id: string;
   chatId: string;
@@ -134,6 +141,7 @@ export interface NormalizedMessage {
   fromMe: boolean;
   contentType: 'text' | 'html';
   text: string;
+  segments: BodySegment[];
   /** Auth-protected Graph hostedContents URLs extracted from inline <img> tags. */
   hostedImages: string[];
   replyTo: { id: string | null; senderName: string | null; text: string | null } | null;
@@ -155,8 +163,24 @@ export interface MsgraphPluginState {
   credentials: CredentialStatus;
   chats: NormalizedChat[];
   chatsNextLink: string | null;
+  chatsFullyLoaded: boolean;
   loadingMoreChats: boolean;
   remoteSearch: { query: string; loading: boolean; results: NormalizedChat[]; error?: string | null } | null;
+  peopleSearch: {
+    query: string;
+    loading: boolean;
+    results: Array<{ id: string; displayName: string; email: string | null }>;
+    error?: string | null;
+  } | null;
+  /** Populated by the 'load-user-card' action. */
+  userCard: {
+    userId: string;
+    loading: boolean;
+    displayName: string | null;
+    email: string | null;
+    jobTitle: string | null;
+    error?: string | null;
+  } | null;
   activeChatId: string | null;
   activeChatMessages: NormalizedMessage[];
   /** userId → data-URL (or null when the user has no photo, so we stop retrying). */

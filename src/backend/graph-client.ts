@@ -13,6 +13,7 @@ import type {
 } from '../shared/types.js';
 import { GraphApiError, TokenExpiredError } from '../shared/types.js';
 import { ensureAccessToken, forceRefresh, acquireFociAccessToken } from './auth.js';
+import { parseHtmlBody } from './html-segments.js';
 import * as tokenCache from './token-cache.js';
 import { getLogger } from './logger-singleton.js';
 
@@ -115,6 +116,12 @@ export class GraphClient {
 
   async getMe(): Promise<GraphUser> {
     return this.request<GraphUser>('GET', '/me', {
+      query: { $select: 'id,displayName,userPrincipalName,mail,jobTitle' },
+    });
+  }
+
+  async getUser(userId: string): Promise<GraphUser> {
+    return this.directoryGet<GraphUser>(`/users/${encodeURIComponent(userId)}`, {
       query: { $select: 'id,displayName,userPrincipalName,mail,jobTitle' },
     });
   }
@@ -241,6 +248,12 @@ export class GraphClient {
   ): Promise<GraphMessage> {
     return this.request<GraphMessage>('POST', `/chats/${encodeURIComponent(chatId)}/messages`, {
       body: { body: { contentType, content: text } },
+    });
+  }
+
+  async sendMessageRaw(chatId: string, payload: Record<string, unknown>): Promise<GraphMessage> {
+    return this.request<GraphMessage>('POST', `/chats/${encodeURIComponent(chatId)}/messages`, {
+      body: payload,
     });
   }
 
@@ -509,6 +522,9 @@ export function normalizeMessage(m: GraphMessage, myId: string | null): Normaliz
   const contentType = m.body?.contentType === 'html' ? 'html' : 'text';
   const raw = m.body?.content ?? '';
   const hostedImages = contentType === 'html' ? extractHostedImages(raw) : [];
+  const segments = contentType === 'html'
+    ? parseHtmlBody(raw, m.mentions)
+    : (raw ? [{ type: 'text' as const, text: raw }] : []);
   const refAttachment = (m.attachments ?? []).find((a) => a.contentType === 'messageReference');
   const replyTo = refAttachment ? parseMessageReference(refAttachment.content) : null;
   const attachments = (m.attachments ?? []).filter((a) => a.contentType !== 'messageReference');
@@ -521,6 +537,7 @@ export function normalizeMessage(m: GraphMessage, myId: string | null): Normaliz
     fromMe: !!myId && fromId === myId,
     contentType,
     text: contentType === 'html' ? stripHtml(raw) : raw,
+    segments,
     hostedImages,
     replyTo,
     attachments: attachments.map((a) => ({
