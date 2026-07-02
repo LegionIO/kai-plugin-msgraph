@@ -24,6 +24,8 @@ const TOOL_LABELS: Record<keyof ToolPermissions, string> = {
   forwardMessage: 'forward-message — forward a message to a person or chat',
   markChatRead: 'mark-chat-read — clear a chat\'s unread indicator',
   getPresence: 'get-presence — availability/activity/status for users',
+  setPresence: 'set-presence — change your own availability (visible to others)',
+  setStatusMessage: 'set-status-message — set/clear your Teams status note',
   createGroupChat: 'create-group-chat — new group + optional first message',
 };
 

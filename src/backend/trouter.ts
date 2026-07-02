@@ -60,6 +60,7 @@ function chatIdFromLink(link: string | null | undefined): string | null {
 
 const HEARTBEAT_MS = 25_000;
 const MAX_BACKOFF_MS = 60_000;
+const REGISTRAR_REFRESH_MS = 50 * 60_000; // TTL is 3600s; refresh before expiry
 
 export class TrouterListener {
   private ws: WS | null = null;
@@ -67,6 +68,7 @@ export class TrouterListener {
   private readonly corId = randomUUID();
   private conNum = 0;
   private hbTimer: ReturnType<typeof setInterval> | null = null;
+  private regTimer: ReturnType<typeof setInterval> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffMs = 1000;
   private stopped = false;
@@ -100,6 +102,7 @@ export class TrouterListener {
     this.stopped = true;
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
+    if (this.regTimer) { clearInterval(this.regTimer); this.regTimer = null; }
     try { this.ws?.close(); } catch { /* ignore */ }
     this.ws = null;
   }
@@ -205,6 +208,7 @@ export class TrouterListener {
 
     ws.on('close', (code, reason) => {
       if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
+      if (this.regTimer) { clearInterval(this.regTimer); this.regTimer = null; }
       if (this.ws === ws) this.ws = null;
       getLogger().info(`trouter: closed (${code} ${reason?.toString?.() ?? ''})`);
       this.onEvent({ kind: 'disconnected', willRetry: !this.stopped });
@@ -258,6 +262,10 @@ export class TrouterListener {
     }
     this.surl = surl;
     if (this.presenceSubs.size) void this.sendPresenceSub([...this.presenceSubs], true);
+    if (this.regTimer) clearInterval(this.regTimer);
+    this.regTimer = setInterval(() => {
+      if (this.surl && !this.stopped) void this.register(this.surl);
+    }, REGISTRAR_REFRESH_MS);
   }
 
   private async sendPresenceSub(userIds: string[], purge: boolean): Promise<void> {

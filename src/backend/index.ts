@@ -188,6 +188,8 @@ function registerEnabledTools(api: PluginAPI): void {
     'forward-message': 'forwardMessage',
     'mark-chat-read': 'markChatRead',
     'get-presence': 'getPresence',
+    'set-presence': 'setPresence',
+    'set-status-message': 'setStatusMessage',
     'create-group-chat': 'createGroupChat',
   };
 

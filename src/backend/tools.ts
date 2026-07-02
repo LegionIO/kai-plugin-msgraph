@@ -2,7 +2,10 @@ import type { PluginAPI, GraphUser, GraphChatType } from '../shared/types.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
 import { buildMessageBody, withMessageRef, type PendingImage } from '../shared/markdown.js';
+import { setForcedAvailability, setStatusNote, getMyPresence, type UpsAvailability } from './ic3-client.js';
 import { getLogger } from './logger-singleton.js';
+
+const AVAIL_VALUES = ['Available', 'Busy', 'DoNotDisturb', 'BeRightBack', 'Away', 'Offline'] as const;
 
 export type ToolDefinition = {
   name: string;
@@ -76,7 +79,7 @@ async function resolveUser(client: GraphClient, ref: string): Promise<GraphUser>
 }
 
 export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
-  const { ensureAuthenticated } = deps;
+  const { api, ensureAuthenticated } = deps;
 
   return [
     {
@@ -548,6 +551,74 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
     },
 
     {
+      name: 'set-presence',
+      description:
+        "Set the signed-in user's Teams presence (forced availability). Pass reset=true to clear the override and return to automatic. This is a user-visible change others will see immediately.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          availability: {
+            type: 'string',
+            enum: AVAIL_VALUES as unknown as string[],
+            description: 'Desired presence. Ignored when reset=true.',
+          },
+          reset: { type: 'boolean', description: 'Clear the forced override (reverts to Available).' },
+        },
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          await ensureAuthenticated();
+          const { availability, reset } = input as { availability?: UpsAvailability; reset?: boolean };
+          if (reset) {
+            await setForcedAvailability(api, null);
+          } else {
+            if (!availability || !(AVAIL_VALUES as readonly string[]).includes(availability)) {
+              return { error: `availability must be one of: ${AVAIL_VALUES.join(', ')} (or set reset=true)` };
+            }
+            await setForcedAvailability(api, availability);
+          }
+          const now = await getMyPresence(api).catch(() => null);
+          return { success: true, availability: now?.availability ?? availability ?? 'Available', activity: now?.activity ?? null };
+        } catch (err) {
+          return errResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'set-status-message',
+      description:
+        "Set or clear the signed-in user's Teams status message (the note shown on your profile / when people message you). Pass an empty string to clear.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'Status text. Empty string clears the note.' },
+          pinned: {
+            type: 'boolean',
+            description: 'When true, Teams shows the note to people who message you. Default true.',
+          },
+          expiry: {
+            type: 'string',
+            description: 'Optional ISO-8601 expiry timestamp. Omit for no expiry.',
+          },
+        },
+        required: ['message'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          await ensureAuthenticated();
+          const { message, pinned, expiry } = input as { message: string; pinned?: boolean; expiry?: string };
+          await setStatusNote(api, message, { pinned: pinned ?? true, expiry });
+          return { success: true, message, pinned: pinned ?? true, expiry: expiry ?? null };
+        } catch (err) {
+          return errResult(err);
+        }
+      },
+    },
+
+    {
       name: 'create-group-chat',
       description:
         'Create a new Teams group chat with the given members (plus the signed-in user) and optionally send an initial message. Members may be emails, UPNs, AAD ids, or unambiguous names. Requires at least 2 other members.',
@@ -617,5 +688,7 @@ export const ALL_TOOL_NAMES = [
   'forward-message',
   'mark-chat-read',
   'get-presence',
+  'set-presence',
+  'set-status-message',
   'create-group-chat',
 ];

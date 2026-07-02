@@ -304,6 +304,8 @@ export interface ToolPermissions {
   forwardMessage: boolean;
   markChatRead: boolean;
   getPresence: boolean;
+  setPresence: boolean;
+  setStatusMessage: boolean;
 }
 
 export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
@@ -321,6 +323,8 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
   forwardMessage: true,
   markChatRead: true,
   getPresence: true,
+  setPresence: true,
+  setStatusMessage: true,
 };
 
 // ── Plugin API (subset used by this plugin) ──
