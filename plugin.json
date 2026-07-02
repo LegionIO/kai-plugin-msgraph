@@ -1,7 +1,7 @@
 {
   "name": "msgraph",
   "displayName": "Teams",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Microsoft Teams chat via Graph API — list, search, read, and send DMs and group chats with AI tooling",
   "icon": {
     "lucide": "message-square-more"
