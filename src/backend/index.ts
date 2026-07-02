@@ -12,7 +12,7 @@ import * as photoCache from './photo-cache.js';
 import * as presenceCache from './presence-cache.js';
 import * as hostedContentCache from './hosted-content-cache.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
-import { buildMessageBody, type PendingImage } from '../shared/markdown.js';
+import { buildMessageBody, withMessageRef, type PendingImage } from '../shared/markdown.js';
 import { DiskCache } from './disk-cache.js';
 import { buildMsgraphTools, ALL_TOOL_NAMES } from './tools.js';
 import { setLogger, getLogger } from './logger-singleton.js';
@@ -91,6 +91,9 @@ function initialState(): MsgraphPluginState {
     remoteSearch: null,
     peopleSearch: null,
     userCard: null,
+    composerReplyTo: null,
+    composerEditing: null,
+    forwardTarget: null,
     activeChatId: null,
     activeChatMessages: [],
     loadingChats: false,
@@ -154,6 +157,11 @@ function registerEnabledTools(api: PluginAPI): void {
     'send-message': 'sendMessage',
     'send-dm': 'sendDm',
     'react-to-message': 'reactToMessage',
+    'edit-message': 'editMessage',
+    'delete-message': 'deleteMessage',
+    'forward-message': 'forwardMessage',
+    'mark-chat-read': 'markChatRead',
+    'get-presence': 'getPresence',
     'create-group-chat': 'createGroupChat',
   };
 
@@ -427,6 +435,8 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
       }
       case 'select-chat': {
         const { chatId } = data as { chatId: string };
+        api.state.set('composerReplyTo', null);
+        api.state.set('composerEditing', null);
         await loadMessages(api, chatId);
         // Optimistically clear the unread dot, then tell Graph.
         const chats = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []).map((c) =>
@@ -452,7 +462,21 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         api.state.set('sendingMessage', true);
         try {
           const client = await ensureAuthenticated(api);
-          const body = payload ?? buildMessageBody(text ?? '', images ?? []);
+          let body = (payload ?? buildMessageBody(text ?? '', images ?? [])) as {
+            body: { contentType: 'text' | 'html'; content: string };
+            attachments?: unknown[];
+          };
+          const rt = (api.state.get() as Partial<MsgraphPluginState>).composerReplyTo;
+          if (rt) {
+            body = withMessageRef(body, {
+              contentType: 'messageReference',
+              id: rt.messageId,
+              messageId: rt.messageId,
+              messagePreview: rt.text,
+              messageSender: rt.senderName ? { user: { displayName: rt.senderName } } : null,
+            });
+            api.state.set('composerReplyTo', null);
+          }
           await client.sendMessageRaw(chatId, body);
           if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
             await loadMessages(api, chatId);
@@ -584,6 +608,127 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
             error: err instanceof Error ? err.message : String(err),
           });
         }
+        break;
+      }
+      case 'set-reply-to': {
+        api.state.set('composerReplyTo', data as MsgraphPluginState['composerReplyTo']);
+        api.state.set('composerEditing', null);
+        break;
+      }
+      case 'start-edit': {
+        const { messageId } = data as { messageId: string };
+        const st = api.state.get() as Partial<MsgraphPluginState>;
+        const chatId = st.activeChatId;
+        if (!chatId) break;
+        const client = await ensureAuthenticated(api, false);
+        // Fetch fresh so we have the raw attachments array to preserve on save.
+        const raw = await client.getMessage(chatId, messageId);
+        const norm = normalizeMessage(raw, tokenCache.getObjectId());
+        api.state.set('composerReplyTo', null);
+        api.state.set('composerEditing', {
+          chatId,
+          messageId,
+          segments: norm.segments,
+          attachments: raw.attachments ?? [],
+        });
+        // Make sure any hosted images are in the cache so the editor can display them.
+        hostedContentCache.ensure(api, client, norm.hostedImages);
+        break;
+      }
+      case 'cancel-edit': {
+        api.state.set('composerEditing', null);
+        break;
+      }
+      case 'save-edit': {
+        const { payload } = data as {
+          payload: {
+            body: { contentType: 'text' | 'html'; content: string };
+            hostedContents?: unknown[];
+            mentions?: unknown[];
+          };
+        };
+        const ed = (api.state.get() as Partial<MsgraphPluginState>).composerEditing;
+        if (!ed) break;
+        const client = await ensureAuthenticated(api);
+        // Re-attach original attachments (cards, files, message refs) with their <attachment> markers.
+        const markers = (ed.attachments ?? [])
+          .filter((a) => a.id)
+          .map((a) => `<attachment id="${a.id}"></attachment>`)
+          .join('');
+        let content = payload.body.content;
+        let contentType: 'text' | 'html' = payload.body.contentType;
+        if (markers) {
+          if (contentType === 'text') {
+            content = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            contentType = 'html';
+          }
+          content += markers;
+        }
+        const patch: Record<string, unknown> = {
+          body: { contentType, content },
+        };
+        if (ed.attachments?.length) patch.attachments = ed.attachments;
+        if (payload.mentions) patch.mentions = payload.mentions;
+        if (payload.hostedContents) patch.hostedContents = payload.hostedContents;
+        await client.editMessage(ed.chatId, ed.messageId, patch as { body: { contentType: 'text' | 'html'; content: string } });
+        api.state.set('composerEditing', null);
+        if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === ed.chatId) {
+          await loadMessages(api, ed.chatId);
+        }
+        break;
+      }
+      case 'set-forward-target': {
+        api.state.set('forwardTarget', data as MsgraphPluginState['forwardTarget']);
+        break;
+      }
+      case 'edit-message': {
+        const { chatId, messageId, text } = data as { chatId: string; messageId: string; text: string };
+        const client = await ensureAuthenticated(api);
+        const p = buildMessageBody(text);
+        await client.editMessage(chatId, messageId, { body: p.body });
+        if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
+          await loadMessages(api, chatId);
+        }
+        break;
+      }
+      case 'delete-message': {
+        const { chatId, messageId } = data as { chatId: string; messageId: string };
+        const client = await ensureAuthenticated(api);
+        await client.deleteMessage(chatId, messageId);
+        if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
+          await loadMessages(api, chatId);
+        }
+        break;
+      }
+      case 'forward-message': {
+        const { source, recipients } = data as {
+          source: NonNullable<MsgraphPluginState['forwardTarget']>;
+          recipients: Array<{ id: string; displayName?: string }>;
+        };
+        const client = await ensureAuthenticated(api);
+        const myId = tokenCache.getObjectId();
+        const ids = [...new Set(recipients.map((r) => r.id).filter((id) => id && id !== myId))];
+        if (ids.length === 0) throw new Error('Select at least one recipient');
+        let targetChatId: string;
+        if (ids.length === 1) {
+          targetChatId = (await client.getOrCreateOneOnOne(ids[0])).id;
+        } else {
+          targetChatId = (await client.createGroupChat(null, ids)).id;
+        }
+        const body = withMessageRef(
+          { body: { contentType: 'html', content: '' } },
+          {
+            contentType: 'forwardedMessageReference',
+            id: source.messageId,
+            messageId: source.messageId,
+            messagePreview: source.text,
+            messageSender: source.senderName ? { user: { displayName: source.senderName } } : null,
+          },
+        );
+        await client.sendMessageRaw(targetChatId, body);
+        api.state.set('forwardTarget', null);
+        await loadChats(api, false);
+        await loadMessages(api, targetChatId);
         break;
       }
       case 'react-to-message': {

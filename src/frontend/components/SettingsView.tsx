@@ -19,6 +19,11 @@ const TOOL_LABELS: Record<keyof ToolPermissions, string> = {
   sendMessage: 'send-message — send to a chat by id',
   sendDm: 'send-dm — resolve person + send DM',
   reactToMessage: 'react-to-message — add/remove a reaction',
+  editMessage: 'edit-message — edit one of your own messages',
+  deleteMessage: 'delete-message — soft-delete one of your own messages',
+  forwardMessage: 'forward-message — forward a message to a person or chat',
+  markChatRead: 'mark-chat-read — clear a chat\'s unread indicator',
+  getPresence: 'get-presence — availability/activity/status for users',
   createGroupChat: 'create-group-chat — new group + optional first message',
 };
 

@@ -84,7 +84,7 @@ export function $isMentionNode(node: LexicalNode | null | undefined): node is Me
 export const pendingImageFiles = new Map<string, File>();
 
 export type SerializedImageNode = Spread<
-  { tempId: string; contentType: string; src: string; name: string | null },
+  { tempId: string; contentType: string; src: string; name: string | null; existingUrl: string | null },
   SerializedLexicalNode
 >;
 
@@ -93,23 +93,33 @@ export class ImageNode extends DecoratorNode<React.ReactNode> {
   __contentType: string;
   __src: string;
   __name: string | null;
+  /** When set, this is an already-hosted Graph image; serialize back to this URL verbatim (no new hostedContents). */
+  __existingUrl: string | null;
 
   static getType(): string {
     return 'inline-image';
   }
   static clone(n: ImageNode): ImageNode {
-    return new ImageNode(n.__tempId, n.__contentType, n.__src, n.__name, n.__key);
+    return new ImageNode(n.__tempId, n.__contentType, n.__src, n.__name, n.__existingUrl, n.__key);
   }
   static importJSON(j: SerializedImageNode): ImageNode {
-    return new ImageNode(j.tempId, j.contentType, j.src, j.name);
+    return new ImageNode(j.tempId, j.contentType, j.src, j.name, j.existingUrl ?? null);
   }
 
-  constructor(tempId: string, contentType: string, src: string, name: string | null, key?: NodeKey) {
+  constructor(
+    tempId: string,
+    contentType: string,
+    src: string,
+    name: string | null,
+    existingUrl: string | null = null,
+    key?: NodeKey,
+  ) {
     super(key);
     this.__tempId = tempId;
     this.__contentType = contentType;
     this.__src = src;
     this.__name = name;
+    this.__existingUrl = existingUrl;
   }
 
   exportJSON(): SerializedImageNode {
@@ -120,6 +130,7 @@ export class ImageNode extends DecoratorNode<React.ReactNode> {
       contentType: this.__contentType,
       src: this.__src,
       name: this.__name,
+      existingUrl: this.__existingUrl,
     };
   }
 
@@ -161,6 +172,9 @@ export class ImageNode extends DecoratorNode<React.ReactNode> {
   getSrc(): string {
     return this.__src;
   }
+  getExistingUrl(): string | null {
+    return this.__existingUrl;
+  }
 
   decorate(): null {
     return null;
@@ -171,7 +185,11 @@ export function $createImageNodeFromFile(file: File): ImageNode {
   const tempId = crypto.randomUUID?.() ?? String(Date.now() + Math.random());
   const src = URL.createObjectURL(file);
   pendingImageFiles.set(tempId, file);
-  return new ImageNode(tempId, file.type || 'image/png', src, file.name || null);
+  return new ImageNode(tempId, file.type || 'image/png', src, file.name || null, null);
+}
+/** For already-hosted Graph images being edited: displaySrc is the fetched data-URL, existingUrl is the Graph URL to emit. */
+export function $createImageNodeFromExisting(existingUrl: string, displaySrc: string): ImageNode {
+  return new ImageNode('', 'image/*', displaySrc, null, existingUrl);
 }
 export function $isImageNode(node: LexicalNode | null | undefined): node is ImageNode {
   return node instanceof ImageNode;

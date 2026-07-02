@@ -46,6 +46,10 @@ function inlineHtml(node: LexicalNode, ctx: Ctx): string {
   if ($isTextNode(node)) return textNodeHtml(node);
   if ($isLineBreakNode(node)) return '<br>';
   if ($isImageNode(node)) {
+    const existing = node.getExistingUrl();
+    if (existing) {
+      return `<img src="${esc(existing)}" style="max-width:100%">`;
+    }
     const tempId = node.getTempId();
     ctx.images.push({ tempId, contentType: node.getContentType() });
     return `<img src="../hostedContents/${tempId}/$value" style="max-width:100%">`;

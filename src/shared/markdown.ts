@@ -88,6 +88,34 @@ export interface PendingImage {
   name?: string;
 }
 
+export interface MessageRef {
+  contentType: 'messageReference' | 'forwardedMessageReference';
+  id: string;
+  messageId: string;
+  messagePreview: string | null;
+  messageSender: { user: { id?: string | null; displayName: string | null } } | null;
+}
+
+/** Attach a reply/forward reference to an outgoing payload (mutates + returns). */
+export function withMessageRef<T extends { body: { contentType: 'text' | 'html'; content: string }; attachments?: unknown[] }>(
+  payload: T,
+  ref: MessageRef,
+): T {
+  const attachId = ref.id;
+  const content = JSON.stringify({
+    messageId: ref.messageId,
+    messagePreview: ref.messagePreview ?? '',
+    messageSender: ref.messageSender ?? undefined,
+  });
+  const marker = `<attachment id="${attachId}"></attachment>`;
+  if (payload.body.contentType === 'text') {
+    payload.body = { contentType: 'html', content: esc(payload.body.content).replace(/\n/g, '<br>') };
+  }
+  payload.body.content = marker + payload.body.content;
+  (payload.attachments ??= []).push({ id: attachId, contentType: ref.contentType, content });
+  return payload;
+}
+
 export interface OutgoingMention {
   id: number;
   mentionText: string;

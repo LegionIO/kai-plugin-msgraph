@@ -55,6 +55,7 @@ import { $setBlocksType } from '@lexical/selection';
 
 import { MentionNode, ImageNode, $createMentionNode, $createImageNodeFromFile, pendingImageFiles } from './nodes.tsx';
 import { serializeToTeams, type SerializedPayload } from './serialize.ts';
+import { $segmentsToBlocks } from './import-segments.ts';
 import { lexicalCodeHighlightTheme, ensureSyntaxThemeInjected } from './syntax-theme.ts';
 import { Avatar } from '../components/Avatar.tsx';
 import type { MsgraphPluginState, Presence } from '../../shared/types.ts';
@@ -86,6 +87,12 @@ const MD_TRANSFORMERS = [
 export interface RichComposerProps {
   chatId: string;
   sending: boolean;
+  replyTo: MsgraphPluginState['composerReplyTo'];
+  editing: MsgraphPluginState['composerEditing'];
+  hostedContents: Record<string, string | null>;
+  onClearReply: () => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (payload: SerializedPayload) => void;
   onSend: (payload: SerializedPayload) => void;
   onSearchPeople: (query: string) => void;
   peopleSearch: MsgraphPluginState['peopleSearch'];
@@ -129,6 +136,12 @@ export function RichComposer(props: RichComposerProps) {
 function ComposerInner({
   chatId,
   sending,
+  replyTo,
+  editing,
+  hostedContents,
+  onClearReply,
+  onCancelEdit,
+  onSaveEdit,
   onSend,
   onSearchPeople,
   peopleSearch,
@@ -149,14 +162,36 @@ function ComposerInner({
     });
   }, [chatId, editor]);
 
+  // Load message content into the editor when entering edit mode; clear on exit.
+  const editingId = editing?.messageId ?? null;
+  useEffect(() => {
+    editor.update(() => {
+      const root = $getRoot();
+      root.clear();
+      if (editing) {
+        for (const b of $segmentsToBlocks(editing.segments, hostedContents)) root.append(b);
+        root.selectEnd();
+      } else {
+        root.append($createParagraphNode());
+      }
+    });
+    if (editing) editor.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId, editor]);
+
   const onSendRef = useRef(onSend);
+  const onSaveEditRef = useRef(onSaveEdit);
+  const editingRef = useRef(editing);
   useEffect(() => { onSendRef.current = onSend; }, [onSend]);
+  useEffect(() => { onSaveEditRef.current = onSaveEdit; }, [onSaveEdit]);
+  useEffect(() => { editingRef.current = editing; }, [editing]);
 
   const send = useCallback(() => {
     void (async () => {
       const { payload, isEmpty: empty } = await serializeToTeams(editor);
       if (empty) return;
-      onSendRef.current(payload);
+      if (editingRef.current) onSaveEditRef.current(payload);
+      else onSendRef.current(payload);
       editor.update(() => {
         const root = $getRoot();
         root.clear();
@@ -285,6 +320,39 @@ function ComposerInner({
 
   return (
     <div className="border-t border-border/50 p-3 shrink-0">
+      {editing && (
+        <div className="mb-2 flex items-center gap-2 rounded-lg border-l-2 border-amber-500 bg-muted/50 pl-2 pr-1.5 py-1.5">
+          <div className="min-w-0 flex-1 text-[11px] text-foreground/80">
+            <span className="font-medium">Editing message</span>
+            {editing.attachments.length > 0 && (
+              <span className="text-muted-foreground">
+                {' '}· {editing.attachments.length} attachment{editing.attachments.length === 1 ? '' : 's'} will be preserved
+              </span>
+            )}
+          </div>
+          <button type="button" onClick={onCancelEdit} className="p-0.5 text-muted-foreground hover:text-foreground" title="Cancel edit">
+            ×
+          </button>
+        </div>
+      )}
+      {replyTo && !editing && (
+        <div className="mb-2 flex items-start gap-2 rounded-lg border-l-2 border-primary bg-muted/50 pl-2 pr-1.5 py-1.5">
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-medium text-muted-foreground">
+              Replying to {replyTo.senderName ?? 'message'}
+            </div>
+            <div className="text-[11px] text-foreground/80 truncate">{replyTo.text ?? ''}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClearReply}
+            className="p-0.5 text-muted-foreground hover:text-foreground"
+            title="Cancel reply"
+          >
+            ×
+          </button>
+        </div>
+      )}
       <div className="rounded-lg border border-border bg-muted focus-within:border-primary transition-colors">
         <div className="relative">
           <RichTextPlugin
@@ -393,7 +461,7 @@ function ComposerInner({
             onClick={send}
             className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
           >
-            {sending ? '…' : 'Send'}
+            {sending ? '…' : editing ? 'Save' : 'Send'}
           </button>
         </div>
       </div>

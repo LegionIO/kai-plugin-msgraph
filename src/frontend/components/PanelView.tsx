@@ -13,6 +13,7 @@ import { RichComposer } from '../editor/RichComposer.tsx';
 import { highlight } from '../highlight.ts';
 import { ensureSyntaxThemeInjected } from '../editor/syntax-theme.ts';
 import { AdaptiveCard } from './AdaptiveCard.tsx';
+import { ForwardDialog } from './ForwardDialog.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
@@ -411,6 +412,8 @@ export function PanelView({ pluginState, onAction }: Props) {
                   onContentResize={scrollToBottomIfSticky}
                   onMentionClick={(userId) => onAction('load-user-card', { userId })}
                   onOpenInTeams={(url) => onAction('open-in-teams', { url })}
+                  onAction={onAction}
+                  activeChatId={s.activeChatId ?? ''}
                 />
               ))}
             </div>
@@ -424,6 +427,12 @@ export function PanelView({ pluginState, onAction }: Props) {
             <RichComposer
               chatId={s.activeChatId ?? ''}
               sending={!!s.sendingMessage}
+              replyTo={s.composerReplyTo ?? null}
+              editing={s.composerEditing ?? null}
+              hostedContents={hostedContents}
+              onClearReply={() => onAction('set-reply-to', null)}
+              onCancelEdit={() => onAction('cancel-edit')}
+              onSaveEdit={(payload) => onAction('save-edit', { payload })}
               onSend={(payload) => {
                 if (!s.activeChatId) return;
                 stickToBottomRef.current = true;
@@ -440,6 +449,9 @@ export function PanelView({ pluginState, onAction }: Props) {
 
       </div>
 
+      {s.forwardTarget && (
+        <ForwardDialog target={s.forwardTarget} state={s} photos={photos} onAction={onAction} />
+      )}
       {s.userCard && (
         <UserCard state={s} photos={photos} presence={presence} onAction={onAction} />
       )}
@@ -467,16 +479,48 @@ function Segments({
   segments,
   fromMe,
   onMentionClick,
+  hostedContents,
+  onContentResize,
 }: {
   segments: BodySegment[];
   fromMe: boolean;
   onMentionClick: (userId: string) => void;
+  hostedContents: Record<string, string | null>;
+  onContentResize?: () => void;
 }) {
   return (
     <>
       {segments.map((seg, i) => {
         if (seg.type === 'text') return <span key={i}>{seg.text}</span>;
         if (seg.type === 'br') return <br key={i} />;
+        if (seg.type === 'image') {
+          const data = hostedContents[seg.url];
+          if (data) {
+            return (
+              <img
+                key={i}
+                src={data}
+                alt=""
+                onLoad={onContentResize}
+                style={{ maxHeight: 320, maxWidth: '100%', display: 'block', margin: '4px 0' }}
+                className="rounded-xl object-contain"
+              />
+            );
+          }
+          return (
+            <div
+              key={i}
+              className="my-1 rounded-xl bg-background/20 border border-border/40 px-3 py-4 text-[11px] opacity-70 flex items-center gap-2"
+            >
+              {data === null ? '⚠️ image unavailable' : (
+                <>
+                  <span className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                  loading image…
+                </>
+              )}
+            </div>
+          );
+        }
         if (seg.type === 'mention') {
           return (
             <button
@@ -534,7 +578,7 @@ function Segments({
           const size = seg.level === 1 ? '1.15em' : seg.level === 2 ? '1.05em' : '1em';
           return (
             <div key={i} style={{ fontSize: size, fontWeight: 600, margin: '6px 0 2px' }}>
-              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} />
+              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} hostedContents={hostedContents} onContentResize={onContentResize} />
             </div>
           );
         }
@@ -544,7 +588,7 @@ function Segments({
               key={i}
               className={`my-1 pl-2.5 border-l-2 ${fromMe ? 'border-primary-foreground/40' : 'border-border'} opacity-90`}
             >
-              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} />
+              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} hostedContents={hostedContents} onContentResize={onContentResize} />
             </div>
           );
         }
@@ -586,6 +630,40 @@ function Segments({
         return null;
       })}
     </>
+  );
+}
+
+function ActionBtn({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ width: 24, height: 24, position: 'relative' }}
+      className="flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+    >
+      <span style={{ width: 14, height: 14, display: 'block' }}>{children}</span>
+      {hover && (
+        <span
+          style={{
+            position: 'absolute',
+            bottom: 'calc(100% + 4px)',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            whiteSpace: 'nowrap',
+            padding: '2px 6px',
+            borderRadius: 4,
+            fontSize: 10,
+            pointerEvents: 'none',
+          }}
+          className="bg-card border border-border text-foreground shadow-lg z-30"
+        >
+          {title}
+        </span>
+      )}
+    </button>
   );
 }
 
@@ -705,6 +783,8 @@ function MessageBubble({
   onContentResize,
   onMentionClick,
   onOpenInTeams,
+  onAction,
+  activeChatId,
 }: {
   m: NormalizedMessage;
   photos: Record<string, string | null>;
@@ -717,8 +797,11 @@ function MessageBubble({
   onContentResize: () => void;
   onMentionClick: (userId: string) => void;
   onOpenInTeams: (url: string) => void;
+  onAction: (action: string, data?: unknown) => void;
+  activeChatId: string;
 }) {
   const [hover, setHover] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   if (m.systemEvent) {
     return (
@@ -734,7 +817,9 @@ function MessageBubble({
   const hasContent =
     hasBody || m.hostedImages.length > 0 || m.attachments.length > 0 || m.files.length > 0 ||
     m.cards.length > 0 || !!m.replyTo || !!m.forwarded;
-  const imageOnly = !hasBody && !m.replyTo && !m.forwarded && m.cards.length === 0 && m.files.length === 0 && m.hostedImages.length > 0;
+  const imageOnly =
+    hasBody && m.segments.every((s) => s.type === 'image' || s.type === 'br') &&
+    !m.replyTo && !m.forwarded && m.cards.length === 0 && m.files.length === 0;
 
   return (
     <div
@@ -807,7 +892,15 @@ function MessageBubble({
               </div>
             </div>
           )}
-          {hasBody && <Segments segments={m.segments} fromMe={m.fromMe} onMentionClick={onMentionClick} />}
+          {hasBody && (
+            <Segments
+              segments={m.segments}
+              fromMe={m.fromMe}
+              onMentionClick={onMentionClick}
+              hostedContents={hostedContents}
+              onContentResize={onContentResize}
+            />
+          )}
           {m.cards.map((card, ci) => (
             <AdaptiveCard
               key={card.id ?? ci}
@@ -842,38 +935,6 @@ function MessageBubble({
               ))}
             </div>
           )}
-          {m.hostedImages.length > 0 && (
-            <div className={`flex flex-col gap-1 ${hasBody ? 'mt-1.5' : ''}`}>
-              {m.hostedImages.map((u) => {
-                const data = hostedContents[u];
-                if (data) {
-                  return (
-                    <img
-                      key={u}
-                      src={data}
-                      alt=""
-                      onLoad={onContentResize}
-                      style={{ maxHeight: 320 }}
-                      className="rounded-xl max-w-full object-contain"
-                    />
-                  );
-                }
-                return (
-                  <div
-                    key={u}
-                    className="rounded-xl bg-background/20 border border-border/40 px-3 py-4 text-[11px] opacity-70 flex items-center gap-2"
-                  >
-                    {data === null ? '⚠️ image unavailable' : (
-                      <>
-                        <span className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
-                        loading image…
-                      </>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
           {!hasContent && <span className="opacity-50 italic">(no content)</span>}
           {m.attachments.length > 0 && (
             <div className="mt-1 space-y-0.5">
@@ -884,18 +945,40 @@ function MessageBubble({
           )}
           {m.reactions.length > 0 && (
             <div
-              className={`absolute -bottom-2.5 ${m.fromMe ? 'left-1' : 'right-1'} flex gap-0.5`}
+              style={{ position: 'absolute', bottom: -10, [m.fromMe ? 'left' : 'right']: 4 }}
+              className="flex gap-0.5"
             >
               {m.reactions.map((r) => (
-                <span
+                <button
                   key={r.type}
-                  title={r.users.join(', ')}
-                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-card border border-border shadow-sm text-[10px] leading-none"
+                  type="button"
+                  title={r.users.join(', ') + (r.mine ? ' — click to remove' : '')}
+                  onClick={() => r.mine && onReact(r.type, true)}
+                  disabled={!r.mine}
+                  className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-card border shadow-sm text-[10px] leading-none ${
+                    r.mine ? 'border-primary/60 cursor-pointer hover:bg-primary/10' : 'border-border cursor-default'
+                  }`}
                 >
                   <span>{r.emoji}</span>
                   {r.count > 1 && <span className="text-muted-foreground">{r.count}</span>}
-                </span>
+                </button>
               ))}
+            </div>
+          )}
+          {confirmDelete && (
+            <div style={{ position: 'absolute', inset: 0, background: 'rgba(20,20,24,0.7)', backdropFilter: 'blur(2px)' }} className="rounded-2xl flex flex-col items-center justify-center gap-2 p-3 z-10">
+              <div className="text-xs text-foreground">Delete this message?</div>
+              <div className="flex gap-1.5">
+                <button type="button" onClick={() => setConfirmDelete(false)} className="px-2 py-0.5 text-[11px] border border-border rounded bg-card">Cancel</button>
+                <button
+                  type="button"
+                  onClick={() => { onAction('delete-message', { chatId: activeChatId, messageId: m.id }); setConfirmDelete(false); }}
+                  className="px-2 py-0.5 text-[11px] rounded"
+                  style={{ background: '#ef4444', color: '#fff' }}
+                >
+                  Delete
+                </button>
+              </div>
             </div>
           )}
           {pickerOpen && (
@@ -910,21 +993,45 @@ function MessageBubble({
           {fmtTime(m.createdDateTime)}
         </div>
       </div>
-      {/* Hover affordance to open picker */}
-      <div className={`self-center shrink-0 transition-opacity ${hover || pickerOpen ? 'opacity-100' : 'opacity-0'}`}>
-        <button
-          type="button"
-          title="React"
-          onClick={() => (pickerOpen ? onClosePicker() : onOpenPicker())}
-          className="w-6 h-6 flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="M8 14s1.5 2 4 2 4-2 4-2" />
-            <line x1="9" y1="9" x2="9.01" y2="9" />
-            <line x1="15" y1="9" x2="15.01" y2="9" />
+      <div
+        className={`self-start shrink-0 flex items-center gap-0.5 transition-opacity ${hover || pickerOpen ? 'opacity-100' : 'opacity-0'}`}
+        style={{ flexDirection: m.fromMe ? 'row-reverse' : 'row' }}
+      >
+        <ActionBtn title="React" onClick={() => (pickerOpen ? onClosePicker() : onOpenPicker())}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" />
           </svg>
-        </button>
+        </ActionBtn>
+        <ActionBtn
+          title="Reply"
+          onClick={() => onAction('set-reply-to', { messageId: m.id, senderName: m.fromName, text: m.text.slice(0, 200) })}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+          </svg>
+        </ActionBtn>
+        <ActionBtn
+          title="Forward"
+          onClick={() => onAction('set-forward-target', { chatId: activeChatId, messageId: m.id, senderName: m.fromName, text: m.text.slice(0, 500) })}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+          </svg>
+        </ActionBtn>
+        {m.fromMe && (
+          <>
+            <ActionBtn title="Edit" onClick={() => onAction('start-edit', { chatId: activeChatId, messageId: m.id })}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
+            </ActionBtn>
+            <ActionBtn title="Delete" onClick={() => setConfirmDelete(true)}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </ActionBtn>
+          </>
+        )}
       </div>
     </div>
   );

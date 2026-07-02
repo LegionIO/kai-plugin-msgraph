@@ -132,6 +132,7 @@ export interface NormalizedReaction {
   type: string;
   count: number;
   users: string[];
+  mine: boolean;
 }
 
 export type BodySegment =
@@ -144,6 +145,7 @@ export type BodySegment =
   | { type: 'heading'; level: 1 | 2 | 3; segments: BodySegment[] }
   | { type: 'hr' }
   | { type: 'link'; href: string; text: string }
+  | { type: 'image'; url: string }
   | { type: 'table'; header: string[] | null; rows: string[][] };
 
 export interface NormalizedMessage {
@@ -200,6 +202,15 @@ export interface MsgraphPluginState {
     jobTitle: string | null;
     error?: string | null;
   } | null;
+  composerReplyTo: { messageId: string; senderName: string | null; text: string | null } | null;
+  composerEditing: {
+    chatId: string;
+    messageId: string;
+    segments: BodySegment[];
+    /** Original attachments (cards, files, message refs) — preserved verbatim on save. */
+    attachments: Array<{ id?: string; contentType?: string; name?: string; contentUrl?: string; content?: string }>;
+  } | null;
+  forwardTarget: { chatId: string; messageId: string; senderName: string | null; text: string | null } | null;
   activeChatId: string | null;
   activeChatMessages: NormalizedMessage[];
   /** userId → data-URL (or null when the user has no photo, so we stop retrying). */
@@ -231,6 +242,11 @@ export interface ToolPermissions {
   sendDm: boolean;
   createGroupChat: boolean;
   reactToMessage: boolean;
+  editMessage: boolean;
+  deleteMessage: boolean;
+  forwardMessage: boolean;
+  markChatRead: boolean;
+  getPresence: boolean;
 }
 
 export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
@@ -243,6 +259,11 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
   sendDm: true,
   createGroupChat: true,
   reactToMessage: true,
+  editMessage: true,
+  deleteMessage: true,
+  forwardMessage: true,
+  markChatRead: true,
+  getPresence: true,
 };
 
 // ── Plugin API (subset used by this plugin) ──

@@ -292,6 +292,22 @@ export class GraphClient {
     });
   }
 
+  async editMessage(chatId: string, messageId: string, payload: { body: { contentType: 'text' | 'html'; content: string } }): Promise<void> {
+    await this.request<void>('PATCH', `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
+      body: payload,
+    });
+  }
+
+  async deleteMessage(chatId: string, messageId: string): Promise<void> {
+    await this.request<void>('POST', `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/softDelete`, {
+      body: {},
+    });
+  }
+
+  async getMessage(chatId: string, messageId: string): Promise<GraphMessage> {
+    return this.request<GraphMessage>('GET', `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`);
+  }
+
   async setReaction(chatId: string, messageId: string, reactionType: string): Promise<void> {
     await this.request<void>(
       'POST',
@@ -526,7 +542,7 @@ export function toReactionGlyph(input: string): string {
   return input.trim();
 }
 
-function normalizeReactions(reactions: GraphReaction[] | undefined): NormalizedReaction[] {
+function normalizeReactions(reactions: GraphReaction[] | undefined, myId: string | null): NormalizedReaction[] {
   if (!reactions?.length) return [];
   const grouped = new Map<string, NormalizedReaction>();
   for (const r of reactions) {
@@ -534,12 +550,14 @@ function normalizeReactions(reactions: GraphReaction[] | undefined): NormalizedR
     const emoji = REACTION_EMOJI[type] ?? type;
     let g = grouped.get(emoji);
     if (!g) {
-      g = { emoji, type, count: 0, users: [] };
+      g = { emoji, type, count: 0, users: [], mine: false };
       grouped.set(emoji, g);
     }
     g.count++;
+    const uid = r.user?.user?.id;
     const name = r.user?.user?.displayName;
     if (name) g.users.push(name);
+    if (myId && uid === myId) g.mine = true;
   }
   return [...grouped.values()];
 }
@@ -676,7 +694,7 @@ export function normalizeMessage(m: GraphMessage, myId: string | null): Normaliz
       url: a.contentUrl ?? null,
     })),
     systemEvent,
-    reactions: normalizeReactions(m.reactions),
+    reactions: normalizeReactions(m.reactions, myId),
     deleted: !!m.deletedDateTime,
   };
 }
