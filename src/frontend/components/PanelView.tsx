@@ -632,7 +632,10 @@ function Segments({
             <a
               key={i}
               href={seg.href}
-              onClick={(e) => e.preventDefault()}
+              onClick={(e) => {
+                e.preventDefault();
+                if (seg.href) window.open?.(seg.href, '_blank');
+              }}
               title={seg.href}
               style={{ color: fromMe ? undefined : '#2563eb', textDecoration: 'underline', cursor: 'pointer' }}
               className={fromMe ? 'text-primary-foreground' : ''}
@@ -1007,7 +1010,10 @@ function MessageBubble({
                 <a
                   key={fi}
                   href={f.url ?? undefined}
-                  onClick={(e) => e.preventDefault()}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (f.url) window.open?.(f.url, '_blank');
+                  }}
                   title={f.url ?? undefined}
                   className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
                     m.fromMe ? 'border-primary-foreground/30 bg-primary-foreground/10' : 'border-border bg-card text-foreground'

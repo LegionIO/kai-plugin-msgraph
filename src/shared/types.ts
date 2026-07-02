@@ -208,10 +208,20 @@ export interface TaskModuleState {
   title: string | null;
   /** Adaptive Card JSON to render in the dialog; null while loading. */
   card: unknown;
+  /** When the bot returns a web-view task module instead of a card. */
+  url?: string | null;
   width?: number | string;
   height?: number | string;
   submitting: boolean;
   error: string | null;
+  /** Dynamic ChoiceSet typeahead round-trip. */
+  choiceSearch?: {
+    reqId: number;
+    query: string;
+    loading: boolean;
+    results: Array<{ title: string; value: string }>;
+    error?: string | null;
+  } | null;
 }
 
 // ── Plugin State ──

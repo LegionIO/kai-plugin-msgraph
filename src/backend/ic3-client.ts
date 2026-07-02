@@ -323,6 +323,31 @@ export async function invokeMessageback(
   });
 }
 
+/** Dynamic ChoiceSet typeahead (Input.ChoiceSet with choices.data / Data.Query). */
+export async function invokeSearch(
+  api: PluginAPI,
+  ctx: InvokeContext,
+  dataset: string,
+  queryText: string,
+): Promise<Array<{ title: string; value: string }>> {
+  const raw = (await post(api, ctx.botId, {
+    type: 'invoke',
+    name: 'application/search',
+    conversation: { id: ctx.chatId },
+    imdisplayname: tokenCache.getDisplayName() ?? '',
+    replyToId: ctx.messageId,
+    value: {
+      queryText,
+      queryOptions: { skip: 0, top: 15 },
+      dataset,
+      context: { theme: 'default' },
+    },
+  })) as { value?: { results?: Array<{ title?: string; value?: string }> } } | undefined;
+  return (raw?.value?.results ?? [])
+    .filter((r): r is { title: string; value: string } => !!r?.value)
+    .map((r) => ({ title: r.title ?? r.value, value: r.value }));
+}
+
 /** task/fetch or task/submit — synchronous, may return the next dialog card. */
 export async function invokeTask(
   api: PluginAPI,

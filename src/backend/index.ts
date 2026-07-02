@@ -16,6 +16,7 @@ import {
   invokeMessageback,
   invokeTask,
   invokeExecute,
+  invokeSearch,
   clearIC3State,
   getConsumptionHorizons,
   setForcedAvailability,
@@ -235,6 +236,7 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
     for (const c of page1) for (const m of c.members) ids.add(m.id);
     photoCache.ensure(api, client, ids);
     presenceCache.refresh(api, client, ids);
+    trouter?.subscribePresence(ids);
 
     // Background: page to the end (once) so member-based search is complete.
     if (
@@ -309,6 +311,7 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
     photoCache.ensure(api, client, userIds);
     photoCache.ensureApps(api, client, appIds);
     presenceCache.refresh(api, client, userIds);
+    trouter?.subscribePresence(userIds);
     hostedContentCache.ensure(api, client, hosted);
     void loadReadReceipts(api, chatId);
   } catch (err) {
@@ -411,6 +414,15 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
       // Sidebar preview / lastUpdated changed — cheap to just refresh page-1.
       void loadChats(api, false);
       return;
+    case 'presence': {
+      const cur = st.presence ?? {};
+      const prev = cur[ev.userId] ?? {};
+      api.state.set('presence', {
+        ...cur,
+        [ev.userId]: { ...prev, availability: ev.availability, activity: ev.activity },
+      });
+      return;
+    }
   }
 }
 
@@ -418,6 +430,8 @@ function startRealtime(api: PluginAPI): void {
   if (trouter) return;
   api.state.set('realtime', 'connecting');
   trouter = new TrouterListener(api, tokenCache.getObjectId(), (ev) => handleTrouterEvent(api, ev));
+  const seed = Object.keys((api.state.get() as Partial<MsgraphPluginState>).presence ?? {});
+  if (seed.length) trouter.subscribePresence(seed);
   trouter.start();
 }
 
@@ -496,6 +510,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           for (const c of more) for (const m of c.members) ids.add(m.id);
           photoCache.ensure(api, client, ids);
           presenceCache.refresh(api, client, ids);
+    trouter?.subscribePresence(ids);
         } finally {
           api.state.set('loadingMoreChats', false);
         }
@@ -562,6 +577,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           for (const c of results) for (const m of c.members) ids.add(m.id);
           photoCache.ensure(api, client, ids);
           presenceCache.refresh(api, client, ids);
+    trouter?.subscribePresence(ids);
         } catch (err) {
           if (seq === remoteSearchSeq) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -905,14 +921,14 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           await ensureAuthenticated(api, false);
           if (p.kind === 'task/fetch') {
             const r = await invokeTask(api, ctx, 'task/fetch', { ...p.data, type: 'task/fetch' });
-            if (r?.card) {
+            if (r?.card || r?.url) {
               api.state.set('taskModule', {
                 botId: p.botId, chatId: p.chatId, messageId: p.messageId,
-                title: r.title ?? p.title ?? null, card: r.card,
+                title: r.title ?? p.title ?? null,
+                card: r.card ?? null, url: r.url ?? null,
                 width: r.width, height: r.height, submitting: false, error: null,
+                choiceSearch: null,
               } satisfies TaskModuleState);
-            } else if (r?.url) {
-              await api.shell.openExternal(r.url);
             } else {
               throw new Error('Bot returned an empty dialog');
             }
@@ -953,11 +969,12 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
             'task/submit',
             form,
           );
-          if (r?.type === 'continue' && r.card) {
+          if (r?.type === 'continue' && (r.card || r.url)) {
             api.state.set('taskModule', {
-              ...tm, title: r.title ?? tm.title, card: r.card,
+              ...tm, title: r.title ?? tm.title,
+              card: r.card ?? null, url: r.url ?? null,
               width: r.width ?? tm.width, height: r.height ?? tm.height,
-              submitting: false, error: null,
+              submitting: false, error: null, choiceSearch: null,
             } satisfies TaskModuleState);
           } else {
             api.state.set('taskModule', null);
@@ -979,6 +996,39 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
       }
       case 'close-task-module': {
         api.state.set('taskModule', null);
+        break;
+      }
+      case 'search-task-choices': {
+        const { reqId, dataset, query } = data as { reqId: number; dataset: string; query: string };
+        const tm = (api.state.get() as Partial<MsgraphPluginState>).taskModule;
+        if (!tm) break;
+        api.state.set('taskModule', {
+          ...tm,
+          choiceSearch: { reqId, query, loading: true, results: [] },
+        });
+        try {
+          const results = await invokeSearch(
+            api,
+            { botId: tm.botId, chatId: tm.chatId, messageId: tm.messageId },
+            dataset,
+            query,
+          );
+          const cur = (api.state.get() as Partial<MsgraphPluginState>).taskModule;
+          if (cur && cur.choiceSearch?.reqId === reqId) {
+            api.state.set('taskModule', { ...cur, choiceSearch: { reqId, query, loading: false, results } });
+          }
+        } catch (err) {
+          const cur = (api.state.get() as Partial<MsgraphPluginState>).taskModule;
+          if (cur && cur.choiceSearch?.reqId === reqId) {
+            api.state.set('taskModule', {
+              ...cur,
+              choiceSearch: {
+                reqId, query, loading: false, results: [],
+                error: err instanceof Error ? err.message : String(err),
+              },
+            });
+          }
+        }
         break;
       }
       case 'set-presence': {

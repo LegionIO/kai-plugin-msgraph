@@ -51,6 +51,8 @@ export function TaskModuleDialog({
               mode="taskModule"
               frameless
               pending={tm.submitting}
+              choiceSearch={tm.choiceSearch ?? null}
+              onSearchChoices={(req) => onAction('search-task-choices', req)}
               teamsDeepLink={`https://teams.microsoft.com/l/message/${tm.chatId}/${tm.messageId}?context=${encodeURIComponent('{"contextType":"chat"}')}`}
               onOpenUrl={(url) => window.open?.(url, '_blank')}
               onOpenInTeams={(url) => onAction('open-in-teams', { url })}
@@ -69,6 +71,32 @@ export function TaskModuleDialog({
                 }
               }}
             />
+          ) : tm.url ? (
+            <div className="py-6 text-center">
+              <p className="text-xs text-muted-foreground mb-3">
+                This app wants to show a web dialog, which Kai can't embed.
+              </p>
+              <div className="flex gap-2 justify-center">
+                <button
+                  type="button"
+                  onClick={() => tm.url && window.open?.(tm.url, '_blank')}
+                  className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90"
+                >
+                  Open in browser
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onAction('open-in-teams', {
+                      url: `https://teams.microsoft.com/l/message/${tm.chatId}/${tm.messageId}?context=${encodeURIComponent('{"contextType":"chat"}')}`,
+                    })
+                  }
+                  className="px-3 py-1.5 text-xs font-medium text-muted-foreground bg-muted border border-border rounded-lg hover:bg-muted/80"
+                >
+                  Open in Teams
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="flex items-center justify-center py-8">
               <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />

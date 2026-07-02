@@ -9,6 +9,14 @@ export interface CardInvokeRequest {
   title?: string | null;
 }
 
+export interface ChoiceSearchState {
+  reqId: number;
+  query: string;
+  loading: boolean;
+  results: Array<{ title: string; value: string }>;
+  error?: string | null;
+}
+
 interface MsTeamsBlock {
   type?: string;
   text?: string;
@@ -43,6 +51,14 @@ function ensureCss() {
 .msg-ac .ac-factset .ac-fact-title{opacity:.85;padding-right:14px}
 .msg-ac [style*="font-family: Courier"],.msg-ac [style*="font-family:Courier"],.msg-ac [style*="monospace"]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace !important;background:rgba(127,127,127,.15);padding:1px 4px;border-radius:3px}
 .msg-ac .ac-input,.msg-ac input,.msg-ac select,.msg-ac textarea{background:transparent;color:inherit;border:1px solid rgba(127,127,127,.35);border-radius:6px;padding:4px 6px;font:inherit;font-size:11px}
+.msg-ac .ac-choiceSetInput-filtered-container{position:relative;width:100%}
+.msg-ac .ac-choiceSetInput-filtered-textbox{width:100%;box-sizing:border-box;padding:5px 8px;font-size:12px}
+.msg-ac .ac-choiceSetInput-filtered-dropdown{display:none}
+.msg-ac .ac-choiceSetInput-filtered-dropdown.ac-choiceSetInput-filtered-dropdown-open{display:flex;flex-direction:column;position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:50;max-height:220px;overflow-y:auto;background:var(--card,#1b1b1f);border:1px solid rgba(127,127,127,.35);border-radius:8px;padding:4px;box-shadow:0 12px 32px rgba(0,0,0,.35)}
+.msg-ac .ac-choiceSetInput-choice{display:block;width:100%;box-sizing:border-box;border:none !important;border-radius:6px;padding:5px 8px;cursor:pointer;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msg-ac .ac-choiceSetInput-choice:hover,.msg-ac .ac-choiceSetInput-choice-highlighted{background:rgba(127,127,127,.18)}
+.msg-ac .ac-choiceSetInput-choice .filterMatchHighlight,.msg-ac .ac-choiceSetInput-choice b{font-weight:600}
+.msg-ac .ac-choiceSetInput-statusIndicator,.msg-ac .ac-choiceSetInput-errorIndicator{padding:6px 8px;font-size:11px;opacity:.7}
 `;
   document.head.appendChild(s);
   cssInjected = true;
@@ -67,6 +83,7 @@ function makeHostConfig(dark: boolean) {
     : fgColors('#1f2937', '#6b7280', '#2563eb');
   return new AC.HostConfig({
     fontFamily: 'inherit',
+    inputs: { allowDynamicallyFilteredChoiceSet: true, debounceTimeInMilliSeconds: 250 },
     containerStyles: {
       default: { backgroundColor: 'transparent', foregroundColors: fg },
       emphasis: {
@@ -92,6 +109,8 @@ export function AdaptiveCard({
   mode = 'message',
   pending = false,
   frameless = false,
+  onSearchChoices,
+  choiceSearch,
 }: {
   contentJson: string;
   onOpenUrl: (url: string) => void;
@@ -103,6 +122,9 @@ export function AdaptiveCard({
   mode?: 'message' | 'taskModule';
   pending?: boolean;
   frameless?: boolean;
+  /** Dynamic ChoiceSet typeahead: fire a search; results arrive via choiceSearch. */
+  onSearchChoices?: (req: { reqId: number; dataset: string; query: string }) => void;
+  choiceSearch?: ChoiceSearchState | null;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -112,15 +134,32 @@ export function AdaptiveCard({
   const onOpenUrlRef = useRef(onOpenUrl);
   const onOpenInTeamsRef = useRef(onOpenInTeams);
   const onInvokeRef = useRef(onInvoke);
+  const onSearchChoicesRef = useRef(onSearchChoices);
   const deepLinkRef = useRef(teamsDeepLink);
   const modeRef = useRef(mode);
   useEffect(() => {
     onOpenUrlRef.current = onOpenUrl;
     onOpenInTeamsRef.current = onOpenInTeams;
     onInvokeRef.current = onInvoke;
+    onSearchChoicesRef.current = onSearchChoices;
     deepLinkRef.current = teamsDeepLink;
     modeRef.current = mode;
-  }, [onOpenUrl, onOpenInTeams, onInvoke, teamsDeepLink, mode]);
+  }, [onOpenUrl, onOpenInTeams, onInvoke, onSearchChoices, teamsDeepLink, mode]);
+
+  const pendingSearchRef = useRef<{ reqId: number; input: AC.ChoiceSetInput } | null>(null);
+  const searchSeqRef = useRef(0);
+  useEffect(() => {
+    const p = pendingSearchRef.current;
+    if (!p || !choiceSearch || choiceSearch.reqId !== p.reqId) return;
+    if (choiceSearch.loading) return;
+    if (choiceSearch.error) {
+      p.input.showErrorIndicator(choiceSearch.query, choiceSearch.error);
+    } else {
+      p.input.renderChoices(choiceSearch.query, choiceSearch.results);
+    }
+    p.input.removeLoadingIndicator();
+    pendingSearchRef.current = null;
+  }, [choiceSearch]);
 
   const startRedirect = (label: string) => {
     const link = deepLinkRef.current;
@@ -164,6 +203,21 @@ export function AdaptiveCard({
         typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
       const card = new AC.AdaptiveCard();
       card.hostConfig = makeHostConfig(dark);
+      card.onInputValueChanged = (input) => {
+        if (
+          input instanceof AC.ChoiceSetInput &&
+          input.isDynamicTypeahead() &&
+          onSearchChoicesRef.current
+        ) {
+          const query = input.getFilterForDynamicSearch() ?? '';
+          const dataset = input.choicesData?.dataset ?? '';
+          if (!dataset) return;
+          const reqId = ++searchSeqRef.current;
+          pendingSearchRef.current = { reqId, input };
+          input.showLoadingIndicator();
+          onSearchChoicesRef.current({ reqId, dataset, query });
+        }
+      };
       card.onExecuteAction = (action) => {
         if (action instanceof AC.OpenUrlAction && action.url) {
           onOpenUrlRef.current(action.url);

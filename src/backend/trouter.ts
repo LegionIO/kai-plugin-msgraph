@@ -14,9 +14,10 @@
 
 import { randomUUID } from 'crypto';
 import WS from 'ws';
-import { TROUTER_CONNECT_URL, TROUTER_CLIENT_VERSION } from '../shared/constants.js';
+import { TROUTER_CONNECT_URL, TROUTER_CLIENT_VERSION, CLIENT_ID_TEAMS, PRESENCE_SCOPE } from '../shared/constants.js';
 import type { PluginAPI } from '../shared/types.js';
 import { ensureRegion, ic3Token } from './ic3-client.js';
+import { acquireFociAccessToken } from './auth.js';
 import { getLogger } from './logger-singleton.js';
 
 // ── Event shapes emitted to the handler ──
@@ -29,7 +30,8 @@ export type TrouterEvent =
   | { kind: 'messageUpdate'; chatId: string; messageId: string }
   | { kind: 'typing'; chatId: string; fromUserId: string; fromName: string | null }
   | { kind: 'readReceipt'; chatId: string; userId: string; lastReadMessageId: string }
-  | { kind: 'conversationUpdate'; chatId: string };
+  | { kind: 'conversationUpdate'; chatId: string }
+  | { kind: 'presence'; userId: string; availability: string; activity: string };
 
 export type TrouterHandler = (ev: TrouterEvent) => void;
 
@@ -69,12 +71,25 @@ export class TrouterListener {
   private backoffMs = 1000;
   private stopped = false;
   private connectparams: Record<string, unknown> = {};
+  private surl: string | null = null;
+  private presenceSubs = new Set<string>();
 
   constructor(
     private readonly api: PluginAPI,
     private readonly myUserId: string | null,
     private readonly onEvent: TrouterHandler,
   ) {}
+
+  /** Subscribe to live presence updates for these userIds (idempotent, additive). */
+  subscribePresence(userIds: Iterable<string>): void {
+    const add: string[] = [];
+    for (const id of userIds) {
+      if (!id || this.presenceSubs.has(id)) continue;
+      this.presenceSubs.add(id);
+      add.push(id);
+    }
+    if (add.length && this.surl) void this.sendPresenceSub(add, false);
+  }
 
   start(): void {
     this.stopped = false;
@@ -241,10 +256,64 @@ export class TrouterListener {
     } catch (err) {
       getLogger().warn(`trouter: registrar failed (${err})`);
     }
+    this.surl = surl;
+    if (this.presenceSubs.size) void this.sendPresenceSub([...this.presenceSubs], true);
+  }
+
+  private async sendPresenceSub(userIds: string[], purge: boolean): Promise<void> {
+    if (!this.surl) return;
+    try {
+      const [rgn, tok] = await Promise.all([
+        ensureRegion(this.api),
+        acquireFociAccessToken(this.api, CLIENT_ID_TEAMS, PRESENCE_SCOPE),
+      ]);
+      const resp = await this.api.fetch(`${rgn.presenceUPS}/v1/pubsub/subscriptions/${this.epid}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${tok}`,
+          'Content-Type': 'application/json',
+          'x-ms-client-user-agent': 'Teams-V2-Desktop',
+          'x-ms-correlation-id': randomUUID(),
+          'x-ms-endpoint-id': this.epid,
+        },
+        body: JSON.stringify({
+          trouterUri: `${this.surl}unifiedPresenceService`,
+          shouldPurgePreviousSubscriptions: purge,
+          subscriptionsToAdd: userIds.map((id) => ({ mri: `8:orgid:${id}`, source: 'ups' })),
+          subscriptionsToRemove: [],
+        }),
+      });
+      if (!resp.ok) getLogger().warn(`trouter: ups pubsub ${resp.status}`);
+    } catch (err) {
+      getLogger().warn(`trouter: ups pubsub failed (${err})`);
+    }
   }
 
   private handlePush(req: { url?: string; body?: string }): void {
     if (!req.body) return;
+    if (req.url?.endsWith('/unifiedPresenceService')) {
+      try {
+        type PresItem = {
+          mri?: string;
+          availability?: string;
+          activity?: string;
+          presence?: { availability?: string; activity?: string };
+        };
+        const raw = JSON.parse(req.body) as PresItem | { presence?: PresItem[] };
+        const items: PresItem[] = Array.isArray((raw as { presence?: PresItem[] }).presence)
+          ? (raw as { presence: PresItem[] }).presence
+          : [raw as PresItem];
+        for (const it of items) {
+          const uid = mriToUserId(it.mri);
+          const avail = it.presence?.availability ?? it.availability;
+          const act = it.presence?.activity ?? it.activity ?? avail;
+          if (uid && avail) {
+            this.onEvent({ kind: 'presence', userId: uid, availability: avail, activity: act ?? avail });
+          }
+        }
+      } catch { /* ignore */ }
+      return;
+    }
     let body: {
       resourceType?: string;
       resource?: {
