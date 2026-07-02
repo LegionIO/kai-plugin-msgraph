@@ -12,6 +12,19 @@ import * as photoCache from './photo-cache.js';
 import * as presenceCache from './presence-cache.js';
 import * as hostedContentCache from './hosted-content-cache.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
+import {
+  invokeMessageback,
+  invokeTask,
+  invokeExecute,
+  clearIC3State,
+  getConsumptionHorizons,
+  setForcedAvailability,
+  setStatusNote,
+  sendTyping,
+  clearTypingThrottle,
+  type UpsAvailability,
+} from './ic3-client.js';
+import { TrouterListener, type TrouterEvent } from './trouter.js';
 import { buildMessageBody, withMessageRef, type PendingImage } from '../shared/markdown.js';
 import { DiskCache } from './disk-cache.js';
 import { buildMsgraphTools, ALL_TOOL_NAMES } from './tools.js';
@@ -29,12 +42,18 @@ import type {
   UserPreferences,
   ToolPermissions,
   MfaState,
+  CardActionPayload,
+  TaskModuleState,
 } from '../shared/types.js';
 import { DEFAULT_TOOL_PERMISSIONS } from '../shared/types.js';
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let unsubConfig: (() => void) | null = null;
+let trouter: TrouterListener | null = null;
+const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const chatRefreshDebounce = new Map<string, ReturnType<typeof setTimeout>>();
+const TYPING_TTL_MS = 8000;
 let hadValidTokenSinceLogout = false;
 let messageLoadSeq = 0;
 let remoteSearchSeq = 0;
@@ -94,8 +113,14 @@ function initialState(): MsgraphPluginState {
     composerReplyTo: null,
     composerEditing: null,
     forwardTarget: null,
+    taskModule: null,
+    cardActionPending: null,
     activeChatId: null,
     activeChatMessages: [],
+    realtime: 'disabled',
+    realtimeError: null,
+    typing: {},
+    readReceipts: {},
     loadingChats: false,
     loadingMessages: false,
     sendingMessage: false,
@@ -285,12 +310,126 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
     photoCache.ensureApps(api, client, appIds);
     presenceCache.refresh(api, client, userIds);
     hostedContentCache.ensure(api, client, hosted);
+    void loadReadReceipts(api, chatId);
   } catch (err) {
     if (seq !== messageLoadSeq) return;
     api.state.set('error', err instanceof Error ? err.message : String(err));
   } finally {
     if (seq === messageLoadSeq) api.state.set('loadingMessages', false);
   }
+}
+
+async function loadReadReceipts(api: PluginAPI, chatId: string): Promise<void> {
+  try {
+    const horizons = await getConsumptionHorizons(api, chatId);
+    const cur = ((api.state.get() as Partial<MsgraphPluginState>).readReceipts ?? {});
+    api.state.set('readReceipts', { ...cur, [chatId]: horizons });
+  } catch (err) {
+    getLogger().warn(`consumptionhorizons(${chatId}) failed: ${err}`);
+  }
+}
+
+// ── Real-time (Trouter) ──
+
+function clearTyping(api: PluginAPI, chatId: string): void {
+  const t = typingTimers.get(chatId);
+  if (t) { clearTimeout(t); typingTimers.delete(chatId); }
+  const cur = ((api.state.get() as Partial<MsgraphPluginState>).typing ?? {});
+  if (cur[chatId]) {
+    const { [chatId]: _drop, ...rest } = cur;
+    api.state.set('typing', rest);
+  }
+}
+
+function scheduleChatReload(api: PluginAPI, chatId: string): void {
+  const existing = chatRefreshDebounce.get(chatId);
+  if (existing) return;
+  chatRefreshDebounce.set(chatId, setTimeout(() => {
+    chatRefreshDebounce.delete(chatId);
+    if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
+      void loadMessages(api, chatId);
+    }
+  }, 250));
+}
+
+function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
+  const st = api.state.get() as Partial<MsgraphPluginState>;
+  switch (ev.kind) {
+    case 'connected':
+      api.state.set('realtime', 'connected');
+      api.state.set('realtimeError', null);
+      return;
+    case 'disconnected':
+      api.state.set('realtime', ev.willRetry ? 'connecting' : 'disconnected');
+      return;
+    case 'error':
+      api.state.set('realtimeError', ev.message);
+      return;
+    case 'typing': {
+      const t = typingTimers.get(ev.chatId);
+      if (t) clearTimeout(t);
+      const next = {
+        ...(st.typing ?? {}),
+        [ev.chatId]: {
+          chatId: ev.chatId,
+          userId: ev.fromUserId,
+          displayName: ev.fromName,
+          until: Date.now() + TYPING_TTL_MS,
+        },
+      };
+      api.state.set('typing', next);
+      typingTimers.set(ev.chatId, setTimeout(() => clearTyping(api, ev.chatId), TYPING_TTL_MS));
+      return;
+    }
+    case 'readReceipt': {
+      const cur = st.readReceipts ?? {};
+      const forChat = { ...(cur[ev.chatId] ?? {}), [ev.userId]: ev.lastReadMessageId };
+      api.state.set('readReceipts', { ...cur, [ev.chatId]: forChat });
+      return;
+    }
+    case 'message': {
+      clearTyping(api, ev.chatId);
+      if (st.activeChatId === ev.chatId) {
+        scheduleChatReload(api, ev.chatId);
+      } else if (!ev.own) {
+        const chats = (st.chats ?? []).map((c) =>
+          c.id === ev.chatId ? { ...c, unread: true } : c,
+        );
+        const idx = chats.findIndex((c) => c.id === ev.chatId);
+        if (idx > 0) chats.unshift(...chats.splice(idx, 1));
+        api.state.set('chats', chats);
+        updateNavBadge(api);
+        if (idx < 0) void loadChats(api, false);
+      }
+      return;
+    }
+    case 'messageUpdate': {
+      if (st.activeChatId === ev.chatId) scheduleChatReload(api, ev.chatId);
+      return;
+    }
+    case 'conversationUpdate':
+      // Sidebar preview / lastUpdated changed — cheap to just refresh page-1.
+      void loadChats(api, false);
+      return;
+  }
+}
+
+function startRealtime(api: PluginAPI): void {
+  if (trouter) return;
+  api.state.set('realtime', 'connecting');
+  trouter = new TrouterListener(api, tokenCache.getObjectId(), (ev) => handleTrouterEvent(api, ev));
+  trouter.start();
+}
+
+function stopRealtime(api: PluginAPI): void {
+  trouter?.stop();
+  trouter = null;
+  for (const t of typingTimers.values()) clearTimeout(t);
+  typingTimers.clear();
+  for (const t of chatRefreshDebounce.values()) clearTimeout(t);
+  chatRefreshDebounce.clear();
+  api.state.set('realtime', 'disabled');
+  api.state.set('typing', {});
 }
 
 // ── Actions ──
@@ -304,6 +443,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         await acquireTokenInteractive(api, { forceRefresh: true });
         hadValidTokenSinceLogout = true;
         publishAuthState(api);
+        startRealtime(api);
         await loadChats(api, true);
         void refreshMeProfile(api);
         break;
@@ -314,7 +454,10 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         remoteSearchSeq++;
         meJobTitle = null;
         cancelMfaCode();
+        stopRealtime(api);
         clearFociTokens();
+        clearIC3State();
+        clearTypingThrottle();
         tokenCache.clear();
         tokenCache.persist(api);
         photoCache.clear();
@@ -753,6 +896,123 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         api.state.set('mfa', { needed: false, type: null, approvalNumber: null } satisfies MfaState);
         break;
       }
+      case 'invoke-card-action': {
+        const p = data as CardActionPayload;
+        const ctx = { botId: p.botId, chatId: p.chatId, messageId: p.messageId };
+        api.state.set('cardActionPending', p.messageId);
+        api.state.set('error', null);
+        try {
+          await ensureAuthenticated(api, false);
+          if (p.kind === 'task/fetch') {
+            const r = await invokeTask(api, ctx, 'task/fetch', { ...p.data, type: 'task/fetch' });
+            if (r?.card) {
+              api.state.set('taskModule', {
+                botId: p.botId, chatId: p.chatId, messageId: p.messageId,
+                title: r.title ?? p.title ?? null, card: r.card,
+                width: r.width, height: r.height, submitting: false, error: null,
+              } satisfies TaskModuleState);
+            } else if (r?.url) {
+              await api.shell.openExternal(r.url);
+            } else {
+              throw new Error('Bot returned an empty dialog');
+            }
+          } else if (p.kind === 'execute') {
+            await invokeExecute(api, ctx, p.verb ?? null, p.data);
+            if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === p.chatId) {
+              await loadMessages(api, p.chatId);
+            }
+          } else {
+            await invokeMessageback(api, ctx, p.data);
+            // Bot replies asynchronously; give it a beat, then refresh the thread.
+            await new Promise((r) => setTimeout(r, 900));
+            if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === p.chatId) {
+              await loadMessages(api, p.chatId);
+            }
+          }
+        } catch (err) {
+          throw new Error(
+            `Card action failed (${err instanceof Error ? err.message : String(err)}). ` +
+            `You can open this message in Teams instead.`,
+          );
+        } finally {
+          if ((api.state.get() as Partial<MsgraphPluginState>).cardActionPending === p.messageId) {
+            api.state.set('cardActionPending', null);
+          }
+        }
+        break;
+      }
+      case 'submit-task-module': {
+        const { data: form } = data as { data: Record<string, unknown> };
+        const tm = (api.state.get() as Partial<MsgraphPluginState>).taskModule;
+        if (!tm) break;
+        api.state.set('taskModule', { ...tm, submitting: true, error: null });
+        try {
+          const r = await invokeTask(
+            api,
+            { botId: tm.botId, chatId: tm.chatId, messageId: tm.messageId },
+            'task/submit',
+            form,
+          );
+          if (r?.type === 'continue' && r.card) {
+            api.state.set('taskModule', {
+              ...tm, title: r.title ?? tm.title, card: r.card,
+              width: r.width ?? tm.width, height: r.height ?? tm.height,
+              submitting: false, error: null,
+            } satisfies TaskModuleState);
+          } else {
+            api.state.set('taskModule', null);
+            if (r?.url) await api.shell.openExternal(r.url);
+            if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === tm.chatId) {
+              await loadMessages(api, tm.chatId);
+            }
+          }
+        } catch (err) {
+          const cur = (api.state.get() as Partial<MsgraphPluginState>).taskModule;
+          if (cur) {
+            api.state.set('taskModule', {
+              ...cur, submitting: false,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        break;
+      }
+      case 'close-task-module': {
+        api.state.set('taskModule', null);
+        break;
+      }
+      case 'set-presence': {
+        const { availability } = data as { availability: UpsAvailability | null };
+        await setForcedAvailability(api, availability);
+        // Reflect immediately for the self dot; presenceCache will catch up on next poll.
+        const me = tokenCache.getObjectId();
+        if (me && availability) {
+          const cur = ((api.state.get() as Partial<MsgraphPluginState>).presence ?? {});
+          api.state.set('presence', {
+            ...cur,
+            [me]: { ...(cur[me] ?? { activity: availability }), availability, activity: availability },
+          });
+        }
+        break;
+      }
+      case 'set-status-message': {
+        const { message, pinned } = data as { message: string; pinned?: boolean };
+        await setStatusNote(api, message, { pinned });
+        const me = tokenCache.getObjectId();
+        if (me) {
+          const cur = ((api.state.get() as Partial<MsgraphPluginState>).presence ?? {});
+          api.state.set('presence', {
+            ...cur,
+            [me]: { ...(cur[me] ?? { availability: 'Available', activity: 'Available' }), statusMessage: message },
+          });
+        }
+        break;
+      }
+      case 'typing': {
+        const { chatId } = data as { chatId: string };
+        void sendTyping(api, chatId).catch((e) => log.warn(`sendTyping: ${e}`));
+        break;
+      }
       case 'open-in-teams': {
         const { url } = data as { url: string };
         let ok = false;
@@ -899,6 +1159,7 @@ export async function activate(api: PluginAPI): Promise<void> {
       try {
         await acquireTokenSilent(api);
         publishAuthState(api);
+        startRealtime(api);
         await loadChats(api);
         await refreshMeProfile(api);
       } catch (err) {
@@ -908,12 +1169,14 @@ export async function activate(api: PluginAPI): Promise<void> {
     })();
   }
 
+  // Poll remains as a safety net (trouter can drop events); it's cheap and skips
+  // the active-thread reload when the push connection is live.
   const prefs = getPreferences(api);
   pollTimer = setInterval(() => {
     if (!tokenCache.hasRefreshToken()) return;
     void loadChats(api);
-    const active = (api.state.get() as Partial<MsgraphPluginState>).activeChatId;
-    if (active) void loadMessages(api, active);
+    const st = api.state.get() as Partial<MsgraphPluginState>;
+    if (st.activeChatId && st.realtime !== 'connected') void loadMessages(api, st.activeChatId);
   }, Math.max(15, prefs.pollIntervalSeconds) * 1000);
 
   log.info('msgraph plugin activated');
@@ -923,6 +1186,12 @@ export async function deactivate(): Promise<void> {
   if (pollTimer) clearInterval(pollTimer);
   if (refreshTimer) clearInterval(refreshTimer);
   if (unsubConfig) unsubConfig();
+  trouter?.stop();
+  trouter = null;
+  for (const t of typingTimers.values()) clearTimeout(t);
+  typingTimers.clear();
+  for (const t of chatRefreshDebounce.values()) clearTimeout(t);
+  chatRefreshDebounce.clear();
   photoCache.flush();
   peopleSearchDisk?.flush();
   pollTimer = null;

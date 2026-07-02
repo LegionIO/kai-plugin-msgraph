@@ -398,7 +398,7 @@ export async function ensureAccessToken(api: PluginAPI, opts: EnsureOptions = {}
   return t.accessToken;
 }
 
-// ── Secondary FOCI tokens (per-client, in-memory only) ──
+// ── Secondary FOCI tokens (per client+scope, in-memory only) ──
 
 const fociTokens = new Map<string, { accessToken: string; expiresAt: number; session: number }>();
 
@@ -406,10 +406,19 @@ export function clearFociTokens(): void {
   fociTokens.clear();
 }
 
-/** Redeem the family refresh token as an arbitrary FOCI client (e.g. Outlook Mobile for Presence). */
-export async function acquireFociAccessToken(api: PluginAPI, clientId: string): Promise<string> {
+/**
+ * Redeem the family refresh token as an arbitrary FOCI client for an arbitrary
+ * resource scope (e.g. Outlook Mobile for Graph Presence, or Teams for the IC3
+ * chat service). Cached per (clientId, scope) until near expiry.
+ */
+export async function acquireFociAccessToken(
+  api: PluginAPI,
+  clientId: string,
+  scope: string = GRAPH_SCOPE,
+): Promise<string> {
   const session = tokenCache.currentSession();
-  const cached = fociTokens.get(clientId);
+  const key = `${clientId}|${scope}`;
+  const cached = fociTokens.get(key);
   if (cached && cached.session === session && cached.expiresAt > Date.now() + 60_000) {
     return cached.accessToken;
   }
@@ -419,10 +428,10 @@ export async function acquireFociAccessToken(api: PluginAPI, clientId: string): 
     client_id: clientId,
     grant_type: 'refresh_token',
     refresh_token: rt,
-    scope: GRAPH_SCOPE,
+    scope,
   });
   if (session !== tokenCache.currentSession()) throw new Error('Signed out');
-  fociTokens.set(clientId, {
+  fociTokens.set(key, {
     accessToken: tr.access_token,
     expiresAt: Date.now() + tr.expires_in * 1000,
     session,

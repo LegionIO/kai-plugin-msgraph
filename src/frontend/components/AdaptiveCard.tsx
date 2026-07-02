@@ -1,5 +1,27 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as AC from 'adaptivecards';
+import type { CardActionKind } from '../../shared/types.ts';
+
+export interface CardInvokeRequest {
+  kind: CardActionKind;
+  data: Record<string, unknown>;
+  verb?: string | null;
+  title?: string | null;
+}
+
+interface MsTeamsBlock {
+  type?: string;
+  text?: string;
+  displayText?: string;
+  value?: unknown;
+}
+
+/** Separate the msteams routing block from the rest of action.data. */
+function splitMsTeams(raw: unknown): { data: Record<string, unknown>; msteams: MsTeamsBlock | null } {
+  if (!raw || typeof raw !== 'object') return { data: {}, msteams: null };
+  const { msteams, ...rest } = raw as Record<string, unknown> & { msteams?: MsTeamsBlock };
+  return { data: rest, msteams: (msteams && typeof msteams === 'object') ? msteams : null };
+}
 
 let cssInjected = false;
 function ensureCss() {
@@ -66,11 +88,21 @@ export function AdaptiveCard({
   onOpenUrl,
   teamsDeepLink,
   onOpenInTeams,
+  onInvoke,
+  mode = 'message',
+  pending = false,
+  frameless = false,
 }: {
   contentJson: string;
   onOpenUrl: (url: string) => void;
   teamsDeepLink: string | null;
   onOpenInTeams: (url: string) => void;
+  /** When provided, Submit/Execute actions are routed here instead of the Teams redirect. */
+  onInvoke?: (req: CardInvokeRequest) => void;
+  /** In a task-module dialog, plain Action.Submit means task/submit, not messageback. */
+  mode?: 'message' | 'taskModule';
+  pending?: boolean;
+  frameless?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -79,12 +111,16 @@ export function AdaptiveCard({
 
   const onOpenUrlRef = useRef(onOpenUrl);
   const onOpenInTeamsRef = useRef(onOpenInTeams);
+  const onInvokeRef = useRef(onInvoke);
   const deepLinkRef = useRef(teamsDeepLink);
+  const modeRef = useRef(mode);
   useEffect(() => {
     onOpenUrlRef.current = onOpenUrl;
     onOpenInTeamsRef.current = onOpenInTeams;
+    onInvokeRef.current = onInvoke;
     deepLinkRef.current = teamsDeepLink;
-  }, [onOpenUrl, onOpenInTeams, teamsDeepLink]);
+    modeRef.current = mode;
+  }, [onOpenUrl, onOpenInTeams, onInvoke, teamsDeepLink, mode]);
 
   const startRedirect = (label: string) => {
     const link = deepLinkRef.current;
@@ -136,8 +172,48 @@ export function AdaptiveCard({
         if (action instanceof AC.ToggleVisibilityAction || action instanceof AC.ShowCardAction) {
           return; // handled internally by the renderer
         }
-        // Submit / Execute / anything else → not invocable via Graph.
-        startRedirect(action.title || action.getJsonTypeName?.() || 'This action');
+        const title = action.title || action.getJsonTypeName?.() || 'This action';
+        const invoke = onInvokeRef.current;
+        if (!invoke) {
+          startRedirect(title);
+          return;
+        }
+        if (action instanceof AC.ExecuteAction) {
+          const { data } = splitMsTeams(action.data);
+          invoke({ kind: 'execute', data, verb: action.verb ?? null, title });
+          return;
+        }
+        if (action instanceof AC.SubmitAction) {
+          const { data, msteams } = splitMsTeams(action.data);
+          const t = msteams?.type?.toLowerCase();
+          if (t === 'signin') {
+            const u = typeof msteams?.value === 'string' ? msteams.value : null;
+            if (u) onOpenUrlRef.current(u); else startRedirect(title);
+            return;
+          }
+          if (
+            t === 'task/fetch' ||
+            (t === 'invoke' && (msteams?.value as { type?: string } | undefined)?.type === 'task/fetch')
+          ) {
+            invoke({ kind: 'task/fetch', data, title });
+            return;
+          }
+          if (modeRef.current === 'taskModule') {
+            invoke({ kind: 'task/submit', data, title });
+            return;
+          }
+          if (t === 'messageback' || t === 'imback') {
+            const val =
+              msteams?.value && typeof msteams.value === 'object'
+                ? { ...data, ...(msteams.value as Record<string, unknown>) }
+                : data;
+            invoke({ kind: 'messageback', data: val, title });
+            return;
+          }
+          invoke({ kind: 'messageback', data, title });
+          return;
+        }
+        startRedirect(title);
       };
       card.parse(payload);
       const el = card.render();
@@ -156,11 +232,21 @@ export function AdaptiveCard({
 
   return (
     <div
-      className="my-1.5 rounded-lg border border-border bg-card text-foreground"
+      className={frameless ? 'text-foreground' : 'my-1.5 rounded-lg border border-border bg-card text-foreground'}
       style={{ whiteSpace: 'normal', position: 'relative', overflow: 'hidden' }}
     >
-      <div ref={hostRef} className="px-3 py-2.5" />
+      <div ref={hostRef} className={frameless ? '' : 'px-3 py-2.5'} />
       {error && <div className="px-3 pb-2 text-[11px] text-destructive">Card error: {error}</div>}
+      {pending && !redirect && (
+        <div
+          style={{
+            position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(20,20,24,0.35)', backdropFilter: 'blur(1px)', WebkitBackdropFilter: 'blur(1px)',
+          }}
+        >
+          <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
       {redirect && (
         <div
           style={{

@@ -128,9 +128,15 @@ const backendOptions = {
   platform: 'node',
   format: 'esm',
   outfile: resolve(outputDir, 'backend.js'),
-  external: [],
+  // ws optionally requires these native addons; let its try/catch see the real ENOENT.
+  external: ['bufferutil', 'utf-8-validate'],
   sourcemap: true,
   target: 'node18',
+  // Bundled CJS deps (ws) call require('events') etc. esbuild's ESM __require shim
+  // throws unless a real require is in scope — provide one via createRequire.
+  banner: {
+    js: "import { createRequire as __msgraph_createRequire } from 'module'; var require = __msgraph_createRequire(import.meta.url);",
+  },
   plugins: [localNodeModulesPlugin],
 };
 

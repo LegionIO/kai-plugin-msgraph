@@ -90,6 +90,7 @@ export interface RichComposerProps {
   replyTo: MsgraphPluginState['composerReplyTo'];
   editing: MsgraphPluginState['composerEditing'];
   hostedContents: Record<string, string | null>;
+  onTyping?: () => void;
   onClearReply: () => void;
   onCancelEdit: () => void;
   onSaveEdit: (payload: SerializedPayload) => void;
@@ -139,6 +140,7 @@ function ComposerInner({
   replyTo,
   editing,
   hostedContents,
+  onTyping,
   onClearReply,
   onCancelEdit,
   onSaveEdit,
@@ -181,9 +183,11 @@ function ComposerInner({
 
   const onSendRef = useRef(onSend);
   const onSaveEditRef = useRef(onSaveEdit);
+  const onTypingRef = useRef(onTyping);
   const editingRef = useRef(editing);
   useEffect(() => { onSendRef.current = onSend; }, [onSend]);
   useEffect(() => { onSaveEditRef.current = onSaveEdit; }, [onSaveEdit]);
+  useEffect(() => { onTypingRef.current = onTyping; }, [onTyping]);
   useEffect(() => { editingRef.current = editing; }, [editing]);
 
   const send = useCallback(() => {
@@ -378,7 +382,9 @@ function ComposerInner({
           <OnChangePlugin
             onChange={(state, ed) => {
               state.read(() => {
-                setIsEmpty(!$getRoot().getTextContent().trim() && !hasNonTextContent(ed));
+                const nowEmpty = !$getRoot().getTextContent().trim() && !hasNonTextContent(ed);
+                setIsEmpty(nowEmpty);
+                if (!nowEmpty && !editingRef.current) onTypingRef.current?.();
                 const sel = $getSelection();
                 if ($isRangeSelection(sel)) {
                   const next = new Set<TextFormatType>();

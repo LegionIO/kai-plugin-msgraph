@@ -12,6 +12,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
+    "@types/ws": "^8.18.1",
     "esbuild": "0.28.1",
     "typescript": "^5.7.0"
   },
@@ -26,6 +27,7 @@
     "@lexical/utils": "^0.46.0",
     "adaptivecards": "^3.0.6",
     "highlight.js": "^11.11.1",
-    "lexical": "^0.46.0"
+    "lexical": "^0.46.0",
+    "ws": "^8.21.0"
   }
 }

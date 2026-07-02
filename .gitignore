@@ -6,8 +6,12 @@ token_cache.json
 *.log
 *.tar.gz
 
-# local exploration scripts (not part of the plugin)
+# local exploration scripts / captures (not part of the plugin; may contain tokens)
 /auth.py
 /graph.py
 /send.py
 /foci_scan.py
+/probe_*.py
+/teams-curls.txt
+/taskfetch_response.json
+/trouter_events.jsonl

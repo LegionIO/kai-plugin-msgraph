@@ -177,6 +177,43 @@ export interface Presence {
   statusMessage?: string | null;
 }
 
+export interface TypingState {
+  chatId: string;
+  userId: string;
+  displayName: string | null;
+  /** Epoch ms after which the indicator should be hidden. */
+  until: number;
+}
+
+// ── Card action invocation (via Teams IC3; see backend/ic3-client.ts) ──
+export type CardActionKind = 'messageback' | 'task/fetch' | 'task/submit' | 'execute';
+
+export interface CardActionPayload {
+  kind: CardActionKind;
+  chatId: string;
+  messageId: string;
+  botId: string;
+  /** Merged action.data + collected Input.* values, minus the msteams routing block. */
+  data: Record<string, unknown>;
+  /** Action.Execute only. */
+  verb?: string | null;
+  /** UI label for the pending overlay. */
+  title?: string | null;
+}
+
+export interface TaskModuleState {
+  botId: string;
+  chatId: string;
+  messageId: string;
+  title: string | null;
+  /** Adaptive Card JSON to render in the dialog; null while loading. */
+  card: unknown;
+  width?: number | string;
+  height?: number | string;
+  submitting: boolean;
+  error: string | null;
+}
+
 // ── Plugin State ──
 export interface MsgraphPluginState {
   auth: AuthStatus;
@@ -211,8 +248,18 @@ export interface MsgraphPluginState {
     attachments: Array<{ id?: string; contentType?: string; name?: string; contentUrl?: string; content?: string }>;
   } | null;
   forwardTarget: { chatId: string; messageId: string; senderName: string | null; text: string | null } | null;
+  taskModule: TaskModuleState | null;
+  /** Transient: message-id currently awaiting a card-action round-trip (drives per-card spinner). */
+  cardActionPending: string | null;
   activeChatId: string | null;
   activeChatMessages: NormalizedMessage[];
+  /** Real-time push connection status. */
+  realtime: 'connecting' | 'connected' | 'disconnected' | 'disabled';
+  realtimeError: string | null;
+  /** Per-chat typing indicators keyed by chatId. */
+  typing: Record<string, TypingState>;
+  /** chatId → userId → last-read message id (arrival timestamp string). */
+  readReceipts: Record<string, Record<string, string>>;
   /** userId → data-URL (or null when the user has no photo, so we stop retrying). */
   photos: Record<string, string | null>;
   /** userId → presence (availability/activity). */

@@ -1,17 +1,15 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { AuthStatus, Presence } from '../../shared/types.ts';
 import { Avatar } from './Avatar.tsx';
 
-const AVAIL_LABEL: Record<string, string> = {
-  Available: 'Available',
-  AvailableIdle: 'Available (idle)',
-  Away: 'Away',
-  BeRightBack: 'Be right back',
-  Busy: 'Busy',
-  BusyIdle: 'Busy (idle)',
-  DoNotDisturb: 'Do not disturb',
-  Offline: 'Offline',
-};
+const AVAIL_OPTIONS: Array<{ value: string; label: string; color: string }> = [
+  { value: 'Available', label: 'Available', color: '#6bb700' },
+  { value: 'Busy', label: 'Busy', color: '#c4314b' },
+  { value: 'DoNotDisturb', label: 'Do not disturb', color: '#c4314b' },
+  { value: 'BeRightBack', label: 'Be right back', color: '#ffaa44' },
+  { value: 'Away', label: 'Appear away', color: '#ffaa44' },
+  { value: 'Offline', label: 'Appear offline', color: '#8a8886' },
+];
 
 export function SelfMenu({
   auth,
@@ -19,12 +17,14 @@ export function SelfMenu({
   presence,
   onClose,
   onLogout,
+  onAction,
 }: {
   auth: AuthStatus;
   photo: string | null | undefined;
   presence: Presence | undefined;
   onClose: () => void;
   onLogout: () => void;
+  onAction: (action: string, data?: unknown) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -40,16 +40,19 @@ export function SelfMenu({
     };
   }, [onClose]);
 
-  const avail = presence?.availability ?? '';
-  const activity = presence?.activity ?? '';
-  const availLabel = AVAIL_LABEL[avail] ?? avail.replace(/([A-Z])/g, ' $1').trim();
-  const activityLabel =
-    activity && activity !== avail ? activity.replace(/([A-Z])/g, ' $1').trim() : null;
+  const initialNote = presence?.statusMessage ?? '';
+  const [note, setNote] = useState(initialNote);
+  const [pinned, setPinned] = useState(true);
+  const [savingNote, setSavingNote] = useState(false);
+  const [savingPresence, setSavingPresence] = useState<string | null>(null);
+  const noteDirty = note !== initialNote;
+
+  const currentAvail = presence?.availability ?? '';
 
   return (
     <div
       ref={ref}
-      style={{ width: 288, maxWidth: 'calc(100% - 1rem)' }}
+      style={{ width: 300, maxWidth: 'calc(100% - 1rem)' }}
       className="absolute right-2 top-11 z-40 overflow-hidden rounded-xl border border-border bg-card shadow-2xl p-4"
     >
       <div className="flex items-center gap-3">
@@ -73,28 +76,109 @@ export function SelfMenu({
         </div>
       </div>
 
-      <div className="mt-3 rounded-lg border border-border/60 bg-muted/40 px-3 py-2">
-        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">Presence</div>
-        <div className="text-xs text-foreground">
-          {availLabel || '—'}
-          {activityLabel && <span className="text-muted-foreground"> · {activityLabel}</span>}
+      <div className="mt-3 rounded-lg border border-border/60 bg-muted/40 px-3 py-2.5">
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Set presence</div>
+        <div className="flex flex-col gap-0.5">
+          {AVAIL_OPTIONS.map((o) => {
+            const active = currentAvail === o.value;
+            const busy = savingPresence === o.value;
+            return (
+              <button
+                key={o.value}
+                type="button"
+                disabled={savingPresence !== null}
+                onClick={() => {
+                  setSavingPresence(o.value);
+                  Promise.resolve(onAction('set-presence', { availability: o.value })).finally(
+                    () => setSavingPresence(null),
+                  );
+                }}
+                className={`flex items-center gap-2 px-2 py-1 rounded-md text-xs text-left transition-colors ${
+                  active ? 'bg-primary/15 text-foreground' : 'hover:bg-muted text-foreground/90'
+                } ${savingPresence !== null ? 'opacity-60' : ''}`}
+              >
+                <span
+                  style={{
+                    width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
+                    background: o.value === 'Offline' ? 'transparent' : o.color,
+                    border: o.value === 'Offline' ? `2px solid ${o.color}` : 'none',
+                  }}
+                />
+                <span className="flex-1">{o.label}</span>
+                {busy && <span className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />}
+                {active && !busy && (
+                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3} strokeLinecap="round">
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                )}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            disabled={savingPresence !== null}
+            onClick={() => {
+              setSavingPresence('__reset');
+              Promise.resolve(onAction('set-presence', { availability: null })).finally(
+                () => setSavingPresence(null),
+              );
+            }}
+            className="flex items-center gap-2 px-2 py-1 rounded-md text-xs text-left text-muted-foreground hover:bg-muted"
+          >
+            <span style={{ width: 10, flexShrink: 0 }} />
+            <span className="flex-1">Reset (automatic)</span>
+            {savingPresence === '__reset' && <span className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />}
+          </button>
         </div>
-        {presence?.statusMessage && (
-          <>
-            <div className="text-[10px] uppercase tracking-wide text-muted-foreground mt-2 mb-0.5">
-              Status message
-            </div>
-            <div
-              style={{ maxHeight: 128 }}
-              className="text-xs text-foreground/90 whitespace-pre-wrap break-words overflow-y-auto"
+
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground mt-3 mb-1">Status message</div>
+        <textarea
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          rows={3}
+          placeholder="What's your status?"
+          style={{ resize: 'vertical', maxHeight: 140 }}
+          className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        />
+        <label className="flex items-center gap-1.5 mt-1.5 text-[11px] text-muted-foreground cursor-pointer">
+          <input
+            type="checkbox"
+            checked={pinned}
+            onChange={(e) => setPinned(e.target.checked)}
+            className="w-3 h-3"
+          />
+          Show when people message me
+        </label>
+        <div className="flex gap-1.5 mt-2">
+          <button
+            type="button"
+            disabled={!noteDirty || savingNote}
+            onClick={() => {
+              setSavingNote(true);
+              Promise.resolve(onAction('set-status-message', { message: note, pinned })).finally(
+                () => setSavingNote(false),
+              );
+            }}
+            className="flex-1 px-2.5 py-1.5 text-[11px] font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-40 transition-colors"
+          >
+            {savingNote ? 'Saving…' : 'Save'}
+          </button>
+          {initialNote && (
+            <button
+              type="button"
+              disabled={savingNote}
+              onClick={() => {
+                setNote('');
+                setSavingNote(true);
+                Promise.resolve(onAction('set-status-message', { message: '', pinned: false })).finally(
+                  () => setSavingNote(false),
+                );
+              }}
+              className="px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground bg-muted border border-border rounded-md hover:bg-muted/80 disabled:opacity-40 transition-colors"
             >
-              {presence.statusMessage}
-            </div>
-          </>
-        )}
-        <div className="text-[10px] text-muted-foreground mt-2">
-          Editing presence/status requires <code>Presence.ReadWrite</code>, which isn't available via
-          the current sign-in path — read-only for now.
+              Clear
+            </button>
+          )}
         </div>
       </div>
 

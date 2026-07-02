@@ -22,6 +22,19 @@ export const GRAPH_CLIENT_ID  = CLIENT_ID_OFFICE;
 export const GRAPH_SCOPE = 'https://graph.microsoft.com/.default';
 export const AUTH_SCOPES = `${GRAPH_SCOPE} offline_access openid profile`;
 
+// Teams-internal chat service (IC3) + Trouter push — used to invoke Adaptive
+// Card actions on bots and to receive real-time message/typing/read-receipt
+// events, none of which Graph exposes. See ic3-client.ts / trouter.ts.
+export const IC3_SCOPE      = 'https://ic3.teams.office.com/.default';
+export const SPACES_SCOPE   = 'https://api.spaces.skype.com/.default';
+export const PRESENCE_SCOPE = 'https://presence.teams.microsoft.com/.default';
+export const TEAMS_AUTHSVC_URL       = 'https://teams.microsoft.com/api/authsvc/v1.0/authz';
+export const TEAMS_CHATSVC_FALLBACK  = 'https://teams.microsoft.com/api/chatsvc/amer';
+export const TEAMS_UPS_FALLBACK      = 'https://teams.microsoft.com/ups/noam';
+export const TEAMS_REGISTRAR_FALLBACK = 'https://teams.microsoft.com/registrar/prod/V2/registrations';
+export const TROUTER_CONNECT_URL     = 'wss://go.trouter.teams.microsoft.com/v4/c';
+export const TROUTER_CLIENT_VERSION  = '2026.20.01.1';
+
 // ── Microsoft Graph ──
 export const GRAPH_BASE_URL = 'https://graph.microsoft.com/v1.0';
 

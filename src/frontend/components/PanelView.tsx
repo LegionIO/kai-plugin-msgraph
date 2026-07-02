@@ -12,8 +12,9 @@ import { UserCard } from './UserCard.tsx';
 import { RichComposer } from '../editor/RichComposer.tsx';
 import { highlight } from '../highlight.ts';
 import { ensureSyntaxThemeInjected } from '../editor/syntax-theme.ts';
-import { AdaptiveCard } from './AdaptiveCard.tsx';
+import { AdaptiveCard, type CardInvokeRequest } from './AdaptiveCard.tsx';
 import { ForwardDialog } from './ForwardDialog.tsx';
+import { TaskModuleDialog } from './TaskModuleDialog.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
@@ -49,6 +50,31 @@ export function PanelView({ pluginState, onAction }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const [panelRef, panelHeight] = usePanelHeight();
+
+  const activeTyping = s.activeChatId ? s.typing?.[s.activeChatId] ?? null : null;
+  const activeReceipts = s.activeChatId ? s.readReceipts?.[s.activeChatId] ?? null : null;
+  const myId = s.auth?.objectId ?? null;
+
+  // Index of the newest own-message that every other member has read.
+  const seenIdx = useMemo(() => {
+    const msgs = s.activeChatMessages ?? [];
+    if (!activeReceipts || !myId || msgs.length === 0) return -1;
+    const others = Object.entries(activeReceipts).filter(([uid]) => uid !== myId);
+    if (others.length === 0) return -1;
+    let horizon = Infinity;
+    for (const [, h] of others) {
+      const n = Number(h);
+      if (!Number.isFinite(n)) return -1;
+      if (n < horizon) horizon = n;
+    }
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (!m.fromMe) continue;
+      if (Number(m.id) <= horizon) return i;
+      return -1; // newest own msg is unread → no marker
+    }
+    return -1;
+  }, [s.activeChatMessages, activeReceipts, myId]);
 
   const localMatches = useMemo(() => {
     const list = s.chats ?? [];
@@ -192,6 +218,24 @@ export function PanelView({ pluginState, onAction }: Props) {
       <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2 shrink-0">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-foreground">Teams</h2>
+          <span
+            title={
+              s.realtime === 'connected'
+                ? 'Live: connected'
+                : s.realtime === 'connecting'
+                  ? `Live: connecting${s.realtimeError ? ` — ${s.realtimeError}` : '…'}`
+                  : s.realtimeError
+                    ? `Live: ${s.realtime} — ${s.realtimeError}`
+                    : `Live: ${s.realtime ?? 'disabled'}`
+            }
+            style={{
+              width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+              background:
+                s.realtime === 'connected' ? '#6bb700'
+                : s.realtime === 'connecting' ? '#ffaa44'
+                : '#8a8886',
+            }}
+          />
           <button
             type="button"
             title="New chat"
@@ -253,6 +297,7 @@ export function PanelView({ pluginState, onAction }: Props) {
           auth={s.auth}
           photo={meId ? photos[meId] : null}
           presence={meId ? presence[meId] : undefined}
+          onAction={onAction}
           onClose={() => setSelfMenuOpen(false)}
           onLogout={() => {
             setSelfMenuOpen(false);
@@ -414,8 +459,29 @@ export function PanelView({ pluginState, onAction }: Props) {
                   onOpenInTeams={(url) => onAction('open-in-teams', { url })}
                   onAction={onAction}
                   activeChatId={s.activeChatId ?? ''}
+                  cardPending={s.cardActionPending === m.id}
                 />
               ))}
+              {seenIdx === messages.length - 1 && messages[seenIdx]?.fromMe && (
+                <div className="flex justify-end pr-1" style={{ marginTop: '-4px' }}>
+                  <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" />
+                    </svg>
+                    Seen
+                  </span>
+                </div>
+              )}
+              {activeTyping && (
+                <div className="flex items-center gap-2 pl-9 text-[11px] text-muted-foreground">
+                  <span className="inline-flex gap-0.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce" style={{ animationDelay: '120ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/70 animate-bounce" style={{ animationDelay: '240ms' }} />
+                  </span>
+                  <span>{activeTyping.displayName ?? 'Someone'} is typing…</span>
+                </div>
+              )}
             </div>
 
             {s.error && (
@@ -430,6 +496,9 @@ export function PanelView({ pluginState, onAction }: Props) {
               replyTo={s.composerReplyTo ?? null}
               editing={s.composerEditing ?? null}
               hostedContents={hostedContents}
+              onTyping={() => {
+                if (s.activeChatId) onAction('typing', { chatId: s.activeChatId });
+              }}
               onClearReply={() => onAction('set-reply-to', null)}
               onCancelEdit={() => onAction('cancel-edit')}
               onSaveEdit={(payload) => onAction('save-edit', { payload })}
@@ -449,6 +518,7 @@ export function PanelView({ pluginState, onAction }: Props) {
 
       </div>
 
+      {s.taskModule && <TaskModuleDialog tm={s.taskModule} onAction={onAction} />}
       {s.forwardTarget && (
         <ForwardDialog target={s.forwardTarget} state={s} photos={photos} onAction={onAction} />
       )}
@@ -785,6 +855,7 @@ function MessageBubble({
   onOpenInTeams,
   onAction,
   activeChatId,
+  cardPending,
 }: {
   m: NormalizedMessage;
   photos: Record<string, string | null>;
@@ -799,9 +870,23 @@ function MessageBubble({
   onOpenInTeams: (url: string) => void;
   onAction: (action: string, data?: unknown) => void;
   activeChatId: string;
+  cardPending: boolean;
 }) {
   const [hover, setHover] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const botId = m.fromApp ? m.fromId : null;
+  const onCardInvoke = botId
+    ? (req: CardInvokeRequest) =>
+        onAction('invoke-card-action', {
+          kind: req.kind,
+          chatId: m.chatId || activeChatId,
+          messageId: m.id,
+          botId,
+          data: req.data,
+          verb: req.verb ?? null,
+          title: req.title ?? null,
+        })
+    : undefined;
 
   if (m.systemEvent) {
     return (
@@ -912,6 +997,8 @@ function MessageBubble({
               }
               onOpenUrl={(url) => window.open?.(url, '_blank')}
               onOpenInTeams={(url) => onOpenInTeams(url)}
+              onInvoke={onCardInvoke}
+              pending={cardPending}
             />
           ))}
           {m.files.length > 0 && (
