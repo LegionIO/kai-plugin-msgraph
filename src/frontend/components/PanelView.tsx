@@ -12,6 +12,7 @@ import { UserCard } from './UserCard.tsx';
 import { RichComposer } from '../editor/RichComposer.tsx';
 import { highlight } from '../highlight.ts';
 import { ensureSyntaxThemeInjected } from '../editor/syntax-theme.ts';
+import { AdaptiveCard } from './AdaptiveCard.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
@@ -409,6 +410,7 @@ export function PanelView({ pluginState, onAction }: Props) {
                   onReact={(type, remove) => react(m.id, type, remove)}
                   onContentResize={scrollToBottomIfSticky}
                   onMentionClick={(userId) => onAction('load-user-card', { userId })}
+                  onOpenInTeams={(url) => onAction('open-in-teams', { url })}
                 />
               ))}
             </div>
@@ -510,6 +512,76 @@ function Segments({
         }
         if (seg.type === 'codeblock') {
           return <CodeBlock key={i} code={seg.code} lang={seg.lang} />;
+        }
+        if (seg.type === 'link') {
+          return (
+            <a
+              key={i}
+              href={seg.href}
+              onClick={(e) => e.preventDefault()}
+              title={seg.href}
+              style={{ color: fromMe ? undefined : '#2563eb', textDecoration: 'underline', cursor: 'pointer' }}
+              className={fromMe ? 'text-primary-foreground' : ''}
+            >
+              {seg.text || seg.href}
+            </a>
+          );
+        }
+        if (seg.type === 'hr') {
+          return <div key={i} className="my-2 border-t border-border/60" />;
+        }
+        if (seg.type === 'heading') {
+          const size = seg.level === 1 ? '1.15em' : seg.level === 2 ? '1.05em' : '1em';
+          return (
+            <div key={i} style={{ fontSize: size, fontWeight: 600, margin: '6px 0 2px' }}>
+              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} />
+            </div>
+          );
+        }
+        if (seg.type === 'blockquote') {
+          return (
+            <div
+              key={i}
+              className={`my-1 pl-2.5 border-l-2 ${fromMe ? 'border-primary-foreground/40' : 'border-border'} opacity-90`}
+            >
+              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} />
+            </div>
+          );
+        }
+        if (seg.type === 'table') {
+          return (
+            <div
+              key={i}
+              className="my-1.5 rounded-lg border border-border bg-card text-foreground overflow-auto"
+              style={{ whiteSpace: 'normal', maxHeight: 360 }}
+            >
+              <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.85em' }}>
+                {seg.header && (
+                  <thead>
+                    <tr>
+                      {seg.header.map((h, hi) => (
+                        <th
+                          key={hi}
+                          className="text-left font-semibold border-b border-border px-2.5 py-1.5 bg-muted/40"
+                        >
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                )}
+                <tbody>
+                  {seg.rows.map((r, ri) => (
+                    <tr key={ri} className="border-b border-border/50 last:border-0">
+                      {r.map((c, ci) => (
+                        <td key={ci} className="px-2.5 py-1 align-top">{c}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
         }
         return null;
       })}
@@ -632,6 +704,7 @@ function MessageBubble({
   onReact,
   onContentResize,
   onMentionClick,
+  onOpenInTeams,
 }: {
   m: NormalizedMessage;
   photos: Record<string, string | null>;
@@ -643,11 +716,25 @@ function MessageBubble({
   onReact: (type: string, remove?: boolean) => void;
   onContentResize: () => void;
   onMentionClick: (userId: string) => void;
+  onOpenInTeams: (url: string) => void;
 }) {
   const [hover, setHover] = useState(false);
+
+  if (m.systemEvent) {
+    return (
+      <div className="flex items-center gap-2 my-0.5 text-[10px] text-muted-foreground">
+        <div className="flex-1 border-t border-border/40" />
+        <span className="px-2 whitespace-nowrap">{m.systemEvent}{m.createdDateTime ? ` · ${fmtTime(m.createdDateTime)}` : ''}</span>
+        <div className="flex-1 border-t border-border/40" />
+      </div>
+    );
+  }
+
   const hasBody = m.segments.length > 0;
-  const hasContent = hasBody || m.hostedImages.length > 0 || m.attachments.length > 0 || !!m.replyTo;
-  const imageOnly = !hasBody && !m.replyTo && m.hostedImages.length > 0;
+  const hasContent =
+    hasBody || m.hostedImages.length > 0 || m.attachments.length > 0 || m.files.length > 0 ||
+    m.cards.length > 0 || !!m.replyTo || !!m.forwarded;
+  const imageOnly = !hasBody && !m.replyTo && !m.forwarded && m.cards.length === 0 && m.files.length === 0 && m.hostedImages.length > 0;
 
   return (
     <div
@@ -666,7 +753,12 @@ function MessageBubble({
         style={{ maxWidth: '75%', alignItems: m.fromMe ? 'flex-end' : 'flex-start' }}
       >
         {showHeader && !m.fromMe && m.fromName && (
-          <div className="text-[10px] font-medium text-muted-foreground px-1 mb-0.5">{m.fromName}</div>
+          <div className="text-[10px] font-medium text-muted-foreground px-1 mb-0.5">
+            {m.fromName}
+            {m.fromApp && (
+              <span className="ml-1 px-1 rounded bg-muted text-[9px] uppercase tracking-wide">app</span>
+            )}
+          </div>
         )}
         <div
           onContextMenu={(e) => {
@@ -681,6 +773,24 @@ function MessageBubble({
               : 'bg-muted text-foreground rounded-bl-md'
           }`}
         >
+          {m.forwarded && (
+            <div
+              className={`mb-1.5 rounded-lg border-l-2 px-2 py-1 text-[11px] ${
+                m.fromMe ? 'bg-primary-foreground/15 border-primary-foreground/40' : 'bg-background/60 border-border'
+              }`}
+            >
+              <div className="font-medium opacity-70 flex items-center gap-1">
+                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="15 17 20 12 15 7" /><path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+                </svg>
+                Forwarded{m.forwarded.senderName ? ` from ${m.forwarded.senderName}` : ''}
+                {m.forwarded.originalDate ? ` · ${fmtTime(m.forwarded.originalDate)}` : ''}
+              </div>
+              {m.forwarded.text && (
+                <div className="opacity-80 mt-0.5 whitespace-pre-wrap break-words">{m.forwarded.text}</div>
+              )}
+            </div>
+          )}
           {m.replyTo && (
             <div
               className={`mb-1.5 rounded-lg border-l-2 px-2 py-1 text-[11px] ${
@@ -698,6 +808,40 @@ function MessageBubble({
             </div>
           )}
           {hasBody && <Segments segments={m.segments} fromMe={m.fromMe} onMentionClick={onMentionClick} />}
+          {m.cards.map((card, ci) => (
+            <AdaptiveCard
+              key={card.id ?? ci}
+              contentJson={card.contentJson}
+              teamsDeepLink={
+                m.chatId
+                  ? `https://teams.microsoft.com/l/message/${m.chatId}/${m.id}?context=${encodeURIComponent('{"contextType":"chat"}')}`
+                  : null
+              }
+              onOpenUrl={(url) => window.open?.(url, '_blank')}
+              onOpenInTeams={(url) => onOpenInTeams(url)}
+            />
+          ))}
+          {m.files.length > 0 && (
+            <div className={`flex flex-col gap-1 ${hasBody || m.cards.length ? 'mt-1.5' : ''}`}>
+              {m.files.map((f, fi) => (
+                <a
+                  key={fi}
+                  href={f.url ?? undefined}
+                  onClick={(e) => e.preventDefault()}
+                  title={f.url ?? undefined}
+                  className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                    m.fromMe ? 'border-primary-foreground/30 bg-primary-foreground/10' : 'border-border bg-card text-foreground'
+                  } hover:opacity-90`}
+                  style={{ whiteSpace: 'normal', textDecoration: 'none' }}
+                >
+                  <svg className="w-4 h-4 shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" />
+                  </svg>
+                  <span className="truncate min-w-0">{f.name}</span>
+                </a>
+              ))}
+            </div>
+          )}
           {m.hostedImages.length > 0 && (
             <div className={`flex flex-col gap-1 ${hasBody ? 'mt-1.5' : ''}`}>
               {m.hostedImages.map((u) => {

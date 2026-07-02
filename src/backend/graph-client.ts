@@ -126,6 +126,41 @@ export class GraphClient {
     });
   }
 
+  /** Resolve a bot's Teams-app icon. `appId` is message.from.application.id (== teamsApp id). */
+  async getAppIcon(appId: string): Promise<string | null> {
+    const token = await this.directoryToken();
+    const H = { Authorization: `Bearer ${token}` };
+    // 1. Look up the app + latest definition (v1.0; no $top supported here).
+    const listUrl = `${GRAPH_BASE_URL}/appCatalogs/teamsApps?$filter=id eq '${appId}'&$expand=appDefinitions`;
+    const lr = await this.fetch(listUrl, { headers: H });
+    if (!lr.ok) throw new GraphApiError(`appCatalogs lookup → ${lr.status}`, lr.status);
+    const list = (await lr.json()) as {
+      value?: Array<{ id: string; appDefinitions?: Array<{ id: string }> }>;
+    };
+    const app = list.value?.[0];
+    const def = app?.appDefinitions?.[app.appDefinitions.length - 1];
+    if (!app || !def) return null;
+    // 2. colorIcon is beta-only; store apps expose a public CDN webUrl.
+    const metaUrl = `https://graph.microsoft.com/beta/appCatalogs/teamsApps/${app.id}/appDefinitions/${encodeURIComponent(def.id)}/colorIcon`;
+    const mr = await this.fetch(metaUrl, { headers: H });
+    if (!mr.ok) return null;
+    const meta = (await mr.json()) as { webUrl?: string };
+    // 3. Prefer webUrl (public CDN); fall back to hostedContent bytes for tenant-uploaded apps.
+    if (meta.webUrl) {
+      const ir = await this.fetch(meta.webUrl);
+      if (!ir.ok) return null;
+      const buf = Buffer.from(await ir.arrayBuffer());
+      const ct = ir.headers.get('content-type') || 'image/png';
+      return `data:${ct};base64,${buf.toString('base64')}`;
+    }
+    const hcUrl = `${metaUrl}/hostedContent/$value`;
+    const hr = await this.fetch(hcUrl, { headers: H });
+    if (!hr.ok) return null;
+    const buf = Buffer.from(await hr.arrayBuffer());
+    const ct = hr.headers.get('content-type') || 'image/png';
+    return `data:${ct};base64,${buf.toString('base64')}`;
+  }
+
   async findUsers(query: string, top = 10): Promise<GraphUser[]> {
     const q = query.trim();
     if (!q) return [];
@@ -444,19 +479,29 @@ export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat
       email: m.email ?? null,
     }))
     .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
-  const previewBody = c.lastMessagePreview?.body?.content ?? null;
-  const lastMsgAt = c.lastMessagePreview?.createdDateTime ?? null;
+  const lp = c.lastMessagePreview;
+  const rawBody = lp?.body?.content ?? '';
+  const lastMsgAt = lp?.createdDateTime ?? null;
   const readAt = c.viewpoint?.lastMessageReadDateTime ?? null;
-  const lastFromMe = c.lastMessagePreview?.from?.user?.id === myId;
+  const lastFromMe = lp?.from?.user?.id === myId;
   const unread = !!lastMsgAt && !lastFromMe && (!readAt || Date.parse(readAt) < Date.parse(lastMsgAt));
+
+  let preview = stripHtml(rawBody).slice(0, 200);
+  if (!preview) {
+    if (lp?.eventDetail) preview = describeEvent(lp.eventDetail) ?? '';
+    else if (/<attachment\b/i.test(rawBody)) preview = 'sent a card';
+    else if (/<img\b/i.test(rawBody)) preview = 'sent an image';
+  }
+
   return {
     id: c.id,
     type: c.chatType,
     topic: c.topic ?? (c.chatType === 'oneOnOne' ? members[0]?.displayName ?? null : null),
     members,
     lastUpdated: lastMsgAt ?? c.lastUpdatedDateTime ?? null,
-    lastMessagePreview: previewBody ? stripHtml(previewBody).slice(0, 200) : null,
-    lastMessageFrom: c.lastMessagePreview?.from?.user?.displayName ?? null,
+    lastMessagePreview: preview || null,
+    lastMessageFrom:
+      lp?.from?.user?.displayName ?? lp?.from?.application?.displayName ?? null,
     unread,
     webUrl: c.webUrl ?? null,
   };
@@ -517,34 +562,120 @@ function parseMessageReference(content: string | undefined): NormalizedMessage['
   }
 }
 
+function parseForwarded(content: string | undefined): NormalizedMessage['forwarded'] {
+  if (!content) return null;
+  try {
+    const j = JSON.parse(content) as {
+      originalMessage?: {
+        body?: { content?: string };
+        from?: { user?: { displayName?: string } };
+        createdDateTime?: string;
+      };
+      messagePreview?: string;
+      messageSender?: { user?: { displayName?: string } };
+      originalCreatedDateTime?: string;
+    };
+    const om = j.originalMessage;
+    return {
+      senderName: om?.from?.user?.displayName ?? j.messageSender?.user?.displayName ?? null,
+      text: om?.body?.content ? stripHtml(om.body.content) : j.messagePreview ? stripHtml(j.messagePreview) : null,
+      originalDate: om?.createdDateTime ?? j.originalCreatedDateTime ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function describeEvent(ed: GraphMessage['eventDetail']): string | null {
+  if (!ed) return null;
+  const t = String(ed['@odata.type'] ?? '').replace('#microsoft.graph.', '');
+  const names = (arr: unknown): string =>
+    Array.isArray(arr)
+      ? (arr as Array<{ displayName?: string; user?: { displayName?: string } }>)
+          .map((m) => m.displayName ?? m.user?.displayName)
+          .filter(Boolean)
+          .join(', ')
+      : '';
+  const initiator =
+    (ed as { initiator?: { user?: { displayName?: string } } }).initiator?.user?.displayName ?? null;
+  switch (t) {
+    case 'membersAddedEventMessageDetail':
+      return `${initiator ? `${initiator} added ` : 'Added '}${names((ed as { members?: unknown }).members)}`;
+    case 'membersDeletedEventMessageDetail':
+      return `${initiator ? `${initiator} removed ` : 'Removed '}${names((ed as { members?: unknown }).members)}`;
+    case 'membersJoinedEventMessageDetail':
+      return `${names((ed as { members?: unknown }).members) || 'Someone'} joined`;
+    case 'membersLeftEventMessageDetail':
+      return `${names((ed as { members?: unknown }).members) || 'Someone'} left`;
+    case 'chatRenamedEventMessageDetail':
+      return `${initiator ?? 'Chat'} renamed the chat to “${(ed as { chatDisplayName?: string }).chatDisplayName ?? ''}”`;
+    case 'callStartedEventMessageDetail':
+      return `${initiator ?? 'Call'} started a call`;
+    case 'callEndedEventMessageDetail': {
+      const dur = (ed as { callDuration?: string }).callDuration;
+      return `Call ended${dur ? ` · ${dur.replace(/^PT/i, '').toLowerCase()}` : ''}`;
+    }
+    case 'callRecordingEventMessageDetail':
+      return 'Recording available';
+    case 'callTranscriptEventMessageDetail':
+      return 'Transcript available';
+    case 'messagePinnedEventMessageDetail':
+      return `${initiator ?? 'Someone'} pinned a message`;
+    case 'meetingPolicyUpdatedEventMessageDetail':
+      return 'Meeting options updated';
+    default:
+      return t.replace(/EventMessageDetail$/, '').replace(/([A-Z])/g, ' $1').trim() || 'System event';
+  }
+}
+
 export function normalizeMessage(m: GraphMessage, myId: string | null): NormalizedMessage {
-  const fromId = m.from?.user?.id ?? null;
+  const fromUser = m.from?.user ?? null;
+  const fromAppObj = m.from?.application ?? null;
+  const fromId = fromUser?.id ?? fromAppObj?.id ?? null;
   const contentType = m.body?.contentType === 'html' ? 'html' : 'text';
   const raw = m.body?.content ?? '';
   const hostedImages = contentType === 'html' ? extractHostedImages(raw) : [];
   const segments = contentType === 'html'
     ? parseHtmlBody(raw, m.mentions)
     : (raw ? [{ type: 'text' as const, text: raw }] : []);
-  const refAttachment = (m.attachments ?? []).find((a) => a.contentType === 'messageReference');
+  const all = m.attachments ?? [];
+  const refAttachment = all.find((a) => a.contentType === 'messageReference');
+  const fwdAttachment = all.find((a) => a.contentType === 'forwardedMessageReference');
   const replyTo = refAttachment ? parseMessageReference(refAttachment.content) : null;
-  const attachments = (m.attachments ?? []).filter((a) => a.contentType !== 'messageReference');
+  const forwarded = fwdAttachment ? parseForwarded(fwdAttachment.content) : null;
+  const files = all
+    .filter((a) => a.contentType === 'reference')
+    .map((a) => ({ name: a.name ?? 'file', url: a.contentUrl ?? null, contentType: a.contentType ?? null }));
+  const cards = all
+    .filter((a) => (a.contentType ?? '').startsWith('application/vnd.microsoft.card.') && a.content)
+    .map((a) => ({ id: a.id ?? null, name: a.name ?? null, contentJson: a.content! }));
+  const handled = new Set(['messageReference', 'forwardedMessageReference', 'reference']);
+  const attachments = all.filter(
+    (a) => !handled.has(a.contentType ?? '') && !(a.contentType ?? '').startsWith('application/vnd.microsoft.card.'),
+  );
+  const systemEvent = m.messageType && m.messageType !== 'message' ? describeEvent(m.eventDetail) : null;
   return {
     id: m.id,
     chatId: m.chatId ?? '',
     createdDateTime: m.createdDateTime ?? null,
     fromId,
-    fromName: m.from?.user?.displayName ?? null,
-    fromMe: !!myId && fromId === myId,
+    fromName: fromUser?.displayName ?? fromAppObj?.displayName ?? null,
+    fromApp: !!fromAppObj && !fromUser,
+    fromMe: !!myId && fromUser?.id === myId,
     contentType,
     text: contentType === 'html' ? stripHtml(raw) : raw,
     segments,
     hostedImages,
     replyTo,
+    forwarded,
+    files,
+    cards,
     attachments: attachments.map((a) => ({
       name: a.name ?? null,
       contentType: a.contentType ?? null,
       url: a.contentUrl ?? null,
     })),
+    systemEvent,
     reactions: normalizeReactions(m.reactions),
     deleted: !!m.deletedDateTime,
   };

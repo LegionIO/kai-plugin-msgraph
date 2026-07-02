@@ -29,27 +29,69 @@ function colorFor(id: string): string {
   return COLORS[Math.abs(h) % COLORS.length];
 }
 
-function presenceColor(p: Presence | undefined): { cls: string; label: string } | null {
+type PresenceKind = 'available' | 'busy' | 'dnd' | 'away' | 'oof' | 'offline' | 'unknown';
+
+function presenceInfo(p: Presence | undefined): { kind: PresenceKind; label: string } | null {
   if (!p) return null;
   const a = (p.availability ?? '').toLowerCase();
   const act = (p.activity ?? '').toLowerCase();
   const label = (p.activity && p.activity !== p.availability ? p.activity : p.availability)
     .replace(/([A-Z])/g, ' $1').trim();
-  if (a === 'donotdisturb' || act === 'donotdisturb' || act === 'presenting' || act === 'urgentinterruptionsonly')
-    return { cls: 'bg-rose-600', label };
+  if (a === 'donotdisturb' || act === 'donotdisturb' || act === 'focusing' || act === 'presenting' || act === 'urgentinterruptionsonly')
+    return { kind: 'dnd', label: label || 'Do not disturb' };
   if (a.startsWith('busy') || act === 'inacall' || act === 'inaconferencecall' || act === 'inameeting')
-    return { cls: 'bg-red-500', label };
+    return { kind: 'busy', label: label || 'Busy' };
   if (a.startsWith('available'))
-    return { cls: 'bg-emerald-500', label: 'Available' };
+    return { kind: 'available', label: 'Available' };
   if (a === 'away' || a === 'berightback' || act === 'away' || act === 'berightback' || act === 'inactive')
-    return { cls: 'bg-amber-400', label };
+    return { kind: 'away', label };
   if (act === 'outofoffice')
-    return { cls: 'bg-fuchsia-500', label: 'Out of office' };
+    return { kind: 'oof', label: 'Out of office' };
   if (a === 'offline' || act === 'offline' || act === 'offwork')
-    return { cls: 'bg-zinc-400', label: 'Offline' };
+    return { kind: 'offline', label: 'Offline' };
   if (a === 'presenceunknown' || a === '')
     return null;
-  return { cls: 'bg-zinc-400', label: label || p.availability };
+  return { kind: 'unknown', label: label || p.availability };
+}
+
+function PresenceBadge({ kind, size }: { kind: PresenceKind; size: number }) {
+  const c = {
+    available: '#6bb700',
+    busy: '#c4314b',
+    dnd: '#c4314b',
+    away: '#ffaa44',
+    oof: '#b4009e',
+    offline: '#8a8886',
+    unknown: '#8a8886',
+  }[kind];
+  const outline = kind === 'offline' || kind === 'unknown';
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width={size}
+      height={size}
+      style={{ position: 'absolute', bottom: 0, right: 0, transform: 'translate(15%, 15%)' }}
+    >
+      {outline ? (
+        <circle cx="8" cy="8" r="6.5" fill="var(--background, #fff)" stroke={c} strokeWidth="2" />
+      ) : (
+        <circle cx="8" cy="8" r="7.5" fill={c} />
+      )}
+      {kind === 'available' && (
+        <path d="M4.8 8.3l2 2 4.2-4.6" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      )}
+      {kind === 'dnd' && <rect x="4" y="7" width="8" height="2" rx="1" fill="#fff" />}
+      {kind === 'away' && (
+        <path d="M8 4.2V8l2.4 1.6" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      )}
+      {kind === 'oof' && (
+        <path d="M9.5 5L6.5 8l3 3" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      )}
+      {(kind === 'offline' || kind === 'unknown') && (
+        <path d="M5.8 5.8l4.4 4.4M10.2 5.8l-4.4 4.4" stroke={c} strokeWidth="2" strokeLinecap="round" />
+      )}
+    </svg>
+  );
 }
 
 export function Avatar({
@@ -69,8 +111,8 @@ export function Avatar({
   className?: string;
 }) {
   const dim = { 6: 'w-6 h-6 text-[9px]', 7: 'w-7 h-7 text-[10px]', 8: 'w-8 h-8 text-[11px]', 9: 'w-9 h-9 text-xs', 10: 'w-10 h-10 text-sm' }[size];
-  const dot = { 6: 'w-2 h-2', 7: 'w-2 h-2', 8: 'w-2.5 h-2.5', 9: 'w-3 h-3', 10: 'w-3 h-3' }[size];
-  const p = presenceColor(presence);
+  const badgePx = { 6: 8, 7: 9, 8: 10, 9: 11, 10: 12 }[size];
+  const p = presenceInfo(presence);
   const core = photo ? (
     <img src={photo} alt={name} className="w-full h-full rounded-full object-cover" />
   ) : (
@@ -81,11 +123,7 @@ export function Avatar({
   return (
     <div className={`relative shrink-0 ${dim} ${className}`} title={p ? `${name} — ${p.label}` : name}>
       {core}
-      {p && (
-        <span
-          className={`absolute bottom-0 right-0 translate-x-[15%] translate-y-[15%] ${dot} rounded-full ${p.cls}`}
-        />
-      )}
+      {p && <PresenceBadge kind={p.kind} size={badgePx} />}
     </div>
   );
 }

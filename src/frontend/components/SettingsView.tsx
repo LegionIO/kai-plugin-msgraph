@@ -128,6 +128,21 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
         </div>
       </Section>
 
+      <Section title="Cache">
+        <p className="text-xs text-muted-foreground">
+          Profile photos, bot icons, and people-search results are cached on disk at
+          <code className="mx-1">~/.kai/plugin-caches/msgraph/</code> and refreshed in the
+          background when older than 24h.
+        </p>
+        <button
+          type="button"
+          onClick={() => onAction('clear-cache')}
+          className="mt-3 px-3 py-1.5 text-xs font-medium text-muted-foreground bg-muted border border-border rounded-lg hover:bg-muted/80 transition-colors"
+        >
+          Clear cache
+        </button>
+      </Section>
+
       <Section title="Preferences">
         <label className="flex items-center gap-2 text-xs">
           <input

@@ -8,6 +8,15 @@ const cache = new Map<string, string | null>();
 const inFlight = new Set<string>();
 const CONCURRENCY = 3;
 
+let publishTimer: ReturnType<typeof setTimeout> | null = null;
+function schedulePublish(api: PluginAPI): void {
+  if (publishTimer) return;
+  publishTimer = setTimeout(() => {
+    publishTimer = null;
+    api.state.set('hostedContents', get());
+  }, 120);
+}
+
 export function get(): Record<string, string | null> {
   return Object.fromEntries(cache);
 }
@@ -15,6 +24,7 @@ export function get(): Record<string, string | null> {
 export function clear(): void {
   cache.clear();
   inFlight.clear();
+  if (publishTimer) { clearTimeout(publishTimer); publishTimer = null; }
 }
 
 export function ensure(api: PluginAPI, client: GraphClient, urls: Iterable<string>): void {
@@ -41,7 +51,7 @@ export function ensure(api: PluginAPI, client: GraphClient, urls: Iterable<strin
         } finally {
           inFlight.delete(u);
         }
-        if (session === tokenCache.currentSession()) api.state.set('hostedContents', get());
+        if (session === tokenCache.currentSession()) schedulePublish(api);
       }
     });
     await Promise.all(workers);

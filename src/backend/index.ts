@@ -13,6 +13,7 @@ import * as presenceCache from './presence-cache.js';
 import * as hostedContentCache from './hosted-content-cache.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import { buildMessageBody, type PendingImage } from '../shared/markdown.js';
+import { DiskCache } from './disk-cache.js';
 import { buildMsgraphTools, ALL_TOOL_NAMES } from './tools.js';
 import { setLogger, getLogger } from './logger-singleton.js';
 import {
@@ -41,9 +42,11 @@ let meJobTitle: string | null = null;
 let paginationInFlight = false;
 const MAX_CHAT_PAGES = 20;
 
-const peopleSearchCache = new Map<string, { at: number; results: Array<{ id: string; displayName: string; email: string | null }> }>();
-const PEOPLE_CACHE_TTL_MS = 5 * 60_000;
-const PEOPLE_CACHE_MAX = 200;
+type PeopleResults = Array<{ id: string; displayName: string; email: string | null }>;
+const peopleSearchCache = new Map<string, { at: number; results: PeopleResults }>();
+let peopleSearchDisk: DiskCache<PeopleResults> | null = null;
+const PEOPLE_CACHE_TTL_MS = 60 * 60_000;
+const PEOPLE_CACHE_MAX = 400;
 
 // ── Config helpers ──
 
@@ -259,19 +262,20 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
     if (seq !== messageLoadSeq) return;
     const myId = tokenCache.getObjectId();
     const normalized = msgs
-      .filter((m) => m.messageType === 'message' || m.messageType == null)
       .map((m) => normalizeMessage(m, myId))
       .filter((m) => !m.deleted)
       .reverse();
     api.state.set('activeChatMessages', normalized);
-    const ids = new Set<string>();
+    const userIds = new Set<string>();
+    const appIds = new Set<string>();
     const hosted = new Set<string>();
     for (const m of normalized) {
-      if (m.fromId) ids.add(m.fromId);
+      if (m.fromId) (m.fromApp ? appIds : userIds).add(m.fromId);
       for (const u of m.hostedImages) hosted.add(u);
     }
-    photoCache.ensure(api, client, ids);
-    presenceCache.refresh(api, client, ids);
+    photoCache.ensure(api, client, userIds);
+    photoCache.ensureApps(api, client, appIds);
+    presenceCache.refresh(api, client, userIds);
     hostedContentCache.ensure(api, client, hosted);
   } catch (err) {
     if (seq !== messageLoadSeq) return;
@@ -309,6 +313,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         presenceCache.clear();
         hostedContentCache.clear();
         peopleSearchCache.clear();
+        peopleSearchDisk?.clear();
         hadValidTokenSinceLogout = false;
         api.state.replace(initialState() as unknown as Record<string, unknown>);
         publishCredentialState(api);
@@ -568,6 +573,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
             if (oldest) peopleSearchCache.delete(oldest);
           }
           peopleSearchCache.set(cacheKey, { at: Date.now(), results: mapped });
+          peopleSearchDisk?.set(cacheKey, mapped);
           api.state.set('peopleSearch', { query: q, loading: false, results: mapped });
           photoCache.ensure(api, client, results.map((u) => u.id));
         } catch (err) {
@@ -648,6 +654,18 @@ async function handleSettingsAction(api: PluginAPI, action: string, data?: unkno
         registerEnabledTools(api);
         break;
       }
+      case 'clear-cache': {
+        photoCache.clear();
+        hostedContentCache.clear();
+        presenceCache.clear();
+        peopleSearchCache.clear();
+        peopleSearchDisk?.clear();
+        api.state.set('photos', {});
+        api.state.set('presence', {});
+        api.state.set('hostedContents', {});
+        log.info('caches cleared');
+        break;
+      }
       case 'set-preference': {
         const { key, value } = data as { key: keyof UserPreferences; value: unknown };
         const current = getPreferences(api);
@@ -690,6 +708,15 @@ export async function activate(api: PluginAPI): Promise<void> {
   hadValidTokenSinceLogout = tokenCache.hasRefreshToken();
 
   api.state.replace(initialState() as unknown as Record<string, unknown>);
+
+  photoCache.init(api);
+  peopleSearchDisk = new DiskCache<PeopleResults>(api.pluginName, 'people-search', {
+    hardTtlMs: 24 * 60 * 60_000,
+    maxEntries: PEOPLE_CACHE_MAX,
+  });
+  for (const [k, e] of peopleSearchDisk.entries()) {
+    peopleSearchCache.set(k, { at: e.at, results: e.v });
+  }
   publishAuthState(api);
   publishCredentialState(api);
 
@@ -738,7 +765,10 @@ export async function activate(api: PluginAPI): Promise<void> {
 
   const prefs = getPreferences(api);
   pollTimer = setInterval(() => {
-    if (tokenCache.hasRefreshToken()) void loadChats(api);
+    if (!tokenCache.hasRefreshToken()) return;
+    void loadChats(api);
+    const active = (api.state.get() as Partial<MsgraphPluginState>).activeChatId;
+    if (active) void loadMessages(api, active);
   }, Math.max(15, prefs.pollIntervalSeconds) * 1000);
 
   log.info('msgraph plugin activated');
@@ -748,6 +778,8 @@ export async function deactivate(): Promise<void> {
   if (pollTimer) clearInterval(pollTimer);
   if (refreshTimer) clearInterval(refreshTimer);
   if (unsubConfig) unsubConfig();
+  photoCache.flush();
+  peopleSearchDisk?.flush();
   pollTimer = null;
   refreshTimer = null;
   unsubConfig = null;

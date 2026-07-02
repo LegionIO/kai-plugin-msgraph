@@ -80,8 +80,13 @@ export interface GraphChat {
   lastMessagePreview?: {
     id?: string;
     createdDateTime?: string;
+    messageType?: string;
     body?: { content?: string; contentType?: string };
-    from?: { user?: { id?: string; displayName?: string } | null } | null;
+    from?: {
+      user?: { id?: string; displayName?: string } | null;
+      application?: { id?: string; displayName?: string } | null;
+    } | null;
+    eventDetail?: { '@odata.type'?: string; [k: string]: unknown } | null;
   } | null;
 }
 
@@ -98,11 +103,15 @@ export interface GraphMessage {
   lastModifiedDateTime?: string;
   deletedDateTime?: string | null;
   messageType?: string;
-  from?: { user?: { id?: string; displayName?: string } | null; application?: unknown } | null;
+  from?: {
+    user?: { id?: string; displayName?: string } | null;
+    application?: { id?: string; displayName?: string } | null;
+  } | null;
   body?: { contentType?: 'text' | 'html'; content?: string } | null;
   attachments?: Array<{ id?: string; contentType?: string; name?: string; contentUrl?: string; content?: string }>;
   mentions?: unknown[];
   reactions?: GraphReaction[];
+  eventDetail?: { '@odata.type'?: string; [k: string]: unknown } | null;
 }
 
 // ── Normalized Types (frontend / tool output) ──
@@ -130,7 +139,12 @@ export type BodySegment =
   | { type: 'br' }
   | { type: 'mention'; userId: string | null; displayName: string }
   | { type: 'code'; code: string }
-  | { type: 'codeblock'; code: string; lang: string | null };
+  | { type: 'codeblock'; code: string; lang: string | null }
+  | { type: 'blockquote'; segments: BodySegment[] }
+  | { type: 'heading'; level: 1 | 2 | 3; segments: BodySegment[] }
+  | { type: 'hr' }
+  | { type: 'link'; href: string; text: string }
+  | { type: 'table'; header: string[] | null; rows: string[][] };
 
 export interface NormalizedMessage {
   id: string;
@@ -138,6 +152,7 @@ export interface NormalizedMessage {
   createdDateTime: string | null;
   fromId: string | null;
   fromName: string | null;
+  fromApp: boolean;
   fromMe: boolean;
   contentType: 'text' | 'html';
   text: string;
@@ -145,7 +160,11 @@ export interface NormalizedMessage {
   /** Auth-protected Graph hostedContents URLs extracted from inline <img> tags. */
   hostedImages: string[];
   replyTo: { id: string | null; senderName: string | null; text: string | null } | null;
+  forwarded: { senderName: string | null; text: string | null; originalDate: string | null } | null;
+  files: Array<{ name: string; url: string | null; contentType: string | null }>;
+  cards: Array<{ id: string | null; name: string | null; contentJson: string }>;
   attachments: Array<{ name: string | null; contentType: string | null; url: string | null }>;
+  systemEvent: string | null;
   reactions: NormalizedReaction[];
   deleted: boolean;
 }
