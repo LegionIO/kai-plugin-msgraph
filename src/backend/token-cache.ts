@@ -64,6 +64,10 @@ export function getObjectId(): string | null {
   return cached?.objectId ?? null;
 }
 
+export function getTenantId(): string | null {
+  return cached?.tenantId ?? null;
+}
+
 type PersistedToken = Omit<GraphTokenData, 'accessToken' | 'refreshToken'> & {
   refreshTokenEnc?: string;
 };
@@ -112,6 +116,7 @@ export function loadPersisted(api: PluginAPI): void {
     refreshToken,
     expiresAt: stored.expiresAt ?? 0,
     objectId: stored.objectId ?? '',
+    tenantId: stored.tenantId ?? '',
     email: stored.email ?? '',
     displayName: stored.displayName ?? null,
     scopes: stored.scopes ?? '',

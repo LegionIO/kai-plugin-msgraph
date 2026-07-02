@@ -83,6 +83,7 @@ async function tokenRequest(api: PluginAPI, form: Record<string, string>): Promi
 function buildTokenData(tr: TokenResponse, prevRefreshToken?: string | null): GraphTokenData {
   const access = decodeJwtPayload(tr.access_token);
   let oid = String(access.oid ?? '');
+  let tid = String(access.tid ?? '');
   let email = String(access.upn ?? access.unique_name ?? access.preferred_username ?? '');
   let displayName = (access.name as string | undefined) ?? null;
 
@@ -90,6 +91,7 @@ function buildTokenData(tr: TokenResponse, prevRefreshToken?: string | null): Gr
     try {
       const idc = decodeJwtPayload(tr.id_token);
       oid = String(idc.oid ?? oid);
+      tid = String(idc.tid ?? tid);
       email = String(idc.preferred_username ?? idc.email ?? email);
       displayName = (idc.name as string | undefined) ?? displayName;
     } catch { /* ignore */ }
@@ -100,6 +102,7 @@ function buildTokenData(tr: TokenResponse, prevRefreshToken?: string | null): Gr
     refreshToken: tr.refresh_token ?? prevRefreshToken ?? '',
     expiresAt: Date.now() + tr.expires_in * 1000,
     objectId: oid,
+    tenantId: tid,
     email,
     displayName,
     scopes: String(access.scp ?? tr.scope ?? ''),
@@ -393,6 +396,38 @@ export async function ensureAccessToken(api: PluginAPI, opts: EnsureOptions = {}
   }
   const t = await acquireTokenInteractive(api);
   return t.accessToken;
+}
+
+// ── Secondary FOCI tokens (per-client, in-memory only) ──
+
+const fociTokens = new Map<string, { accessToken: string; expiresAt: number; session: number }>();
+
+export function clearFociTokens(): void {
+  fociTokens.clear();
+}
+
+/** Redeem the family refresh token as an arbitrary FOCI client (e.g. Outlook Mobile for Presence). */
+export async function acquireFociAccessToken(api: PluginAPI, clientId: string): Promise<string> {
+  const session = tokenCache.currentSession();
+  const cached = fociTokens.get(clientId);
+  if (cached && cached.session === session && cached.expiresAt > Date.now() + 60_000) {
+    return cached.accessToken;
+  }
+  const rt = tokenCache.getRefreshToken();
+  if (!rt) throw new Error('Not signed in');
+  const tr = await tokenRequest(api, {
+    client_id: clientId,
+    grant_type: 'refresh_token',
+    refresh_token: rt,
+    scope: GRAPH_SCOPE,
+  });
+  if (session !== tokenCache.currentSession()) throw new Error('Signed out');
+  fociTokens.set(clientId, {
+    accessToken: tr.access_token,
+    expiresAt: Date.now() + tr.expires_in * 1000,
+    session,
+  });
+  return tr.access_token;
 }
 
 /** Force a refresh regardless of current expiry. Used on 401 retry. */

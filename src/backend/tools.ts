@@ -134,7 +134,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             filter?: string;
             top?: number;
           };
-          const raw = await client.listChats({ chatType, top: clampTop(top, 50, 50) });
+          const { chats: raw } = await client.listChats({ chatType, top: clampTop(top, 50, 50) });
           const myId = tokenCache.getObjectId();
           let chats = raw.map((c) => normalizeChat(c, myId));
           if (filter) {

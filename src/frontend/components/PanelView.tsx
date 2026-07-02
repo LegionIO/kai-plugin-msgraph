@@ -1,11 +1,12 @@
 import React, { useMemo, useState, useEffect, useRef, useLayoutEffect } from 'react';
 import type { PluginComponentProps } from '../hooks.ts';
 import { usePanelHeight } from '../hooks.ts';
-import type { MsgraphPluginState, NormalizedChat, NormalizedMessage } from '../../shared/types.ts';
+import type { MsgraphPluginState, NormalizedChat, NormalizedMessage, Presence } from '../../shared/types.ts';
 import { MfaDialog } from './MfaDialog.tsx';
 import { MfaApprovalDialog } from './MfaApprovalDialog.tsx';
 import { Avatar, AvatarStack } from './Avatar.tsx';
 import { ReactionPicker } from './ReactionPicker.tsx';
+import { SelfMenu } from './SelfMenu.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
@@ -28,14 +29,18 @@ function chatTitle(c: NormalizedChat): string {
 export function PanelView({ pluginState, onAction }: Props) {
   const s = pluginState ?? ({} as MsgraphPluginState);
   const photos = s.photos ?? {};
+  const presence = s.presence ?? {};
+  const hostedContents = s.hostedContents ?? {};
   const [filter, setFilter] = useState('');
   const [draft, setDraft] = useState('');
   const [reactionTarget, setReactionTarget] = useState<string | null>(null);
+  const [selfMenuOpen, setSelfMenuOpen] = useState(false);
+  const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const [panelRef, panelHeight] = usePanelHeight();
 
-  const chats = useMemo(() => {
+  const localMatches = useMemo(() => {
     const list = s.chats ?? [];
     if (!filter.trim()) return list;
     const f = filter.toLowerCase();
@@ -47,6 +52,30 @@ export function PanelView({ pluginState, onAction }: Props) {
         ),
     );
   }, [s.chats, filter]);
+
+  const remote = s.remoteSearch;
+  const chats = useMemo(() => {
+    if (!filter.trim()) return localMatches;
+    const seen = new Set(localMatches.map((c) => c.id));
+    const extra = (remote?.query === filter.trim() ? remote.results : []).filter((c) => !seen.has(c.id));
+    return [...localMatches, ...extra];
+  }, [localMatches, remote, filter]);
+
+  // Debounced remote search when the local filter is sparse.
+  useEffect(() => {
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    const q = filter.trim();
+    if (q.length < 2) {
+      onAction('clear-search');
+      return;
+    }
+    searchDebounce.current = setTimeout(() => {
+      onAction('search-chats', { query: q });
+    }, 350);
+    return () => {
+      if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    };
+  }, [filter]);
 
   const activeChat = useMemo(
     () => (s.chats ?? []).find((ch) => ch.id === s.activeChatId) ?? null,
@@ -61,16 +90,23 @@ export function PanelView({ pluginState, onAction }: Props) {
     setReactionTarget(null);
   }, [s.activeChatId]);
 
-  // Auto-scroll: pin to bottom after layout when new messages arrive or chat/height changes,
-  // unless the user has scrolled up.
-  useLayoutEffect(() => {
+  const scrollToBottomIfSticky = () => {
     const el = scrollRef.current;
     if (!el || !stickToBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
     requestAnimationFrame(() => {
-      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      if (scrollRef.current && stickToBottomRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
     });
-  }, [messages.length, s.activeChatId, panelHeight]);
+  };
+
+  // Auto-scroll: pin to bottom after layout when new messages arrive, chat/height changes,
+  // or hosted images finish loading — unless the user has scrolled up.
+  useLayoutEffect(
+    scrollToBottomIfSticky,
+    [messages.length, s.activeChatId, panelHeight, Object.keys(hostedContents).length],
+  );
 
   const onThreadScroll = () => {
     const el = scrollRef.current;
@@ -137,43 +173,81 @@ export function PanelView({ pluginState, onAction }: Props) {
     );
   }
 
+  const meId = s.auth?.objectId ?? null;
+
   return (
     <div
       ref={panelRef}
       style={panelHeight ? { height: panelHeight } : undefined}
-      className="flex min-h-0 overflow-hidden"
+      className="relative flex flex-col min-h-0 overflow-hidden"
     >
+      {/* Top bar */}
+      <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2 shrink-0">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-foreground">Teams</h2>
+          <button
+            type="button"
+            title="Refresh"
+            onClick={() => onAction('refresh-chats')}
+            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+              <path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="text-right min-w-0 hidden sm:block">
+            <div className="text-xs font-medium text-foreground truncate">{s.auth?.displayName ?? s.auth?.email}</div>
+            {s.auth?.displayName && (
+              <div className="text-[10px] text-muted-foreground truncate">{s.auth?.email}</div>
+            )}
+          </div>
+          {meId && (
+            <button
+              type="button"
+              onClick={() => setSelfMenuOpen((v) => !v)}
+              className="rounded-full hover:opacity-90 transition-opacity"
+              title={s.auth?.displayName ?? s.auth?.email ?? undefined}
+            >
+              <Avatar
+                id={meId}
+                name={s.auth?.displayName ?? s.auth?.email ?? 'Me'}
+                photo={photos[meId]}
+                presence={presence[meId]}
+                size={8}
+              />
+            </button>
+          )}
+          <button
+            type="button"
+            title="Sign out"
+            onClick={() => onAction('logout')}
+            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      {selfMenuOpen && s.auth && (
+        <SelfMenu
+          auth={s.auth}
+          photo={meId ? photos[meId] : null}
+          presence={meId ? presence[meId] : undefined}
+          onClose={() => setSelfMenuOpen(false)}
+          onLogout={() => {
+            setSelfMenuOpen(false);
+            onAction('logout');
+          }}
+        />
+      )}
+
+      <div className="flex flex-1 min-h-0">
       {/* Sidebar */}
       <div className="flex w-[280px] min-w-[220px] flex-col border-r border-border/50 min-h-0">
-        <div className="flex items-center justify-between gap-2 px-3 pt-3 pb-2 shrink-0">
-          <div className="flex items-baseline gap-2 min-w-0">
-            <h2 className="text-sm font-semibold text-foreground">Teams</h2>
-            <span className="text-[10px] text-muted-foreground truncate">{s.auth?.email}</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              title="Refresh"
-              onClick={() => onAction('refresh-chats')}
-              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              title="Sign out"
-              onClick={() => onAction('logout')}
-              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="m16 17 5-5-5-5" /><path d="M21 12H9" />
-              </svg>
-            </button>
-          </div>
-        </div>
-        <div className="px-3 pb-2 shrink-0">
+        <div className="px-3 pt-3 pb-2 shrink-0">
           <input
             className="w-full px-2.5 py-1.5 text-xs bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:border-primary transition-colors"
             placeholder="Filter chats…"
@@ -190,12 +264,28 @@ export function PanelView({ pluginState, onAction }: Props) {
               key={ch.id}
               chat={ch}
               photos={photos}
+              presence={presence}
               active={ch.id === s.activeChatId}
               onClick={() => onAction('select-chat', { chatId: ch.id })}
             />
           ))}
-          {!s.loadingChats && chats.length === 0 && (
-            <div className="p-3 text-xs text-muted-foreground">No chats</div>
+          {filter.trim() && remote?.loading && (
+            <div className="px-3 py-2 text-[11px] text-muted-foreground animate-pulse">Searching directory…</div>
+          )}
+          {!s.loadingChats && chats.length === 0 && !(filter.trim() && remote?.loading) && (
+            <div className="p-3 text-xs text-muted-foreground">
+              {filter.trim() ? 'No matching chats' : 'No chats'}
+            </div>
+          )}
+          {!filter.trim() && s.chatsNextLink && (
+            <button
+              type="button"
+              onClick={() => onAction('load-more-chats')}
+              disabled={s.loadingMoreChats}
+              className="mx-1.5 mt-1 mb-2 w-[calc(100%-12px)] px-2 py-1.5 text-[11px] font-medium text-muted-foreground bg-muted border border-border rounded-lg hover:bg-muted/80 disabled:opacity-50 transition-colors"
+            >
+              {s.loadingMoreChats ? 'Loading…' : 'Load more'}
+            </button>
           )}
         </div>
       </div>
@@ -213,10 +303,11 @@ export function PanelView({ pluginState, onAction }: Props) {
                     id={activeChat.members[0].id}
                     name={activeChat.members[0].displayName}
                     photo={photos[activeChat.members[0].id]}
+                    presence={presence[activeChat.members[0].id]}
                     size={9}
                   />
                 ) : (
-                  <AvatarStack members={activeChat.members} photos={photos} />
+                  <AvatarStack members={activeChat.members} photos={photos} presence={presence} />
                 )}
                 <div className="min-w-0">
                   <div className="text-sm font-semibold text-foreground truncate">{chatTitle(activeChat)}</div>
@@ -252,11 +343,13 @@ export function PanelView({ pluginState, onAction }: Props) {
                   key={m.id}
                   m={m}
                   photos={photos}
+                  hostedContents={hostedContents}
                   showHeader={i === 0 || messages[i - 1].fromId !== m.fromId}
                   pickerOpen={reactionTarget === m.id}
                   onOpenPicker={() => setReactionTarget(m.id)}
                   onClosePicker={() => setReactionTarget(null)}
                   onReact={(type, remove) => react(m.id, type, remove)}
+                  onContentResize={scrollToBottomIfSticky}
                 />
               ))}
             </div>
@@ -294,6 +387,8 @@ export function PanelView({ pluginState, onAction }: Props) {
         )}
       </div>
 
+      </div>
+
       {mfa.needed && mfa.type === 'push' && <MfaApprovalDialog approvalNumber={mfa.approvalNumber} />}
       {mfa.needed && (mfa.type === 'sms' || mfa.type === 'totp') && (
         <MfaDialog
@@ -309,11 +404,13 @@ export function PanelView({ pluginState, onAction }: Props) {
 function ChatRow({
   chat,
   photos,
+  presence,
   active,
   onClick,
 }: {
   chat: NormalizedChat;
   photos: Record<string, string | null>;
+  presence: Record<string, Presence>;
   active: boolean;
   onClick: () => void;
 }) {
@@ -327,20 +424,32 @@ function ChatRow({
       }`}
     >
       {chat.type === 'oneOnOne' && chat.members[0] ? (
-        <Avatar id={chat.members[0].id} name={chat.members[0].displayName} photo={photos[chat.members[0].id]} />
+        <Avatar
+          id={chat.members[0].id}
+          name={chat.members[0].displayName}
+          photo={photos[chat.members[0].id]}
+          presence={presence[chat.members[0].id]}
+        />
       ) : (
-        <AvatarStack members={chat.members} photos={photos} max={2} />
+        <AvatarStack members={chat.members} photos={photos} presence={presence} max={2} />
       )}
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
-          <div className="text-xs font-medium text-foreground truncate">{chatTitle(chat)}</div>
+          <div
+            className={`text-xs truncate ${chat.unread ? 'font-semibold text-foreground' : 'font-medium text-foreground'}`}
+          >
+            {chatTitle(chat)}
+          </div>
           <div className="text-[10px] text-muted-foreground shrink-0">{fmtTime(chat.lastUpdated)}</div>
         </div>
-        <div className="text-[11px] text-muted-foreground truncate">
+        <div
+          className={`text-[11px] truncate ${chat.unread ? 'text-foreground/80' : 'text-muted-foreground'}`}
+        >
           {chat.lastMessageFrom ? `${chat.lastMessageFrom}: ` : ''}
           {chat.lastMessagePreview ?? ''}
         </div>
       </div>
+      {chat.unread && <span className="w-2 h-2 rounded-full bg-primary shrink-0" />}
     </div>
   );
 }
@@ -348,21 +457,27 @@ function ChatRow({
 function MessageBubble({
   m,
   photos,
+  hostedContents,
   showHeader,
   pickerOpen,
   onOpenPicker,
   onClosePicker,
   onReact,
+  onContentResize,
 }: {
   m: NormalizedMessage;
   photos: Record<string, string | null>;
+  hostedContents: Record<string, string | null>;
   showHeader: boolean;
   pickerOpen: boolean;
   onOpenPicker: () => void;
   onClosePicker: () => void;
   onReact: (type: string, remove?: boolean) => void;
+  onContentResize: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const hasContent = !!m.text || m.hostedImages.length > 0 || m.attachments.length > 0 || !!m.replyTo;
+  const imageOnly = !m.text && !m.replyTo && m.hostedImages.length > 0;
 
   return (
     <div
@@ -384,13 +499,64 @@ function MessageBubble({
             e.preventDefault();
             onOpenPicker();
           }}
-          className={`relative px-3 py-1.5 rounded-2xl text-sm whitespace-pre-wrap break-words ${
+          className={`relative rounded-2xl text-sm whitespace-pre-wrap break-words ${
+            imageOnly ? 'p-0.5' : 'px-3 py-1.5'
+          } ${
             m.fromMe
               ? 'bg-primary text-primary-foreground rounded-br-md'
               : 'bg-muted text-foreground rounded-bl-md'
           }`}
         >
-          {m.text || <span className="opacity-50 italic">(no text)</span>}
+          {m.replyTo && (
+            <div
+              className={`mb-1.5 rounded-lg border-l-2 px-2 py-1 text-[11px] ${
+                m.fromMe
+                  ? 'bg-primary-foreground/15 border-primary-foreground/40'
+                  : 'bg-background/60 border-border'
+              }`}
+            >
+              {m.replyTo.senderName && (
+                <div className="font-medium opacity-80">{m.replyTo.senderName}</div>
+              )}
+              <div className="opacity-75 line-clamp-3 whitespace-pre-wrap break-words">
+                {m.replyTo.text ?? '(quoted message)'}
+              </div>
+            </div>
+          )}
+          {m.text}
+          {m.hostedImages.length > 0 && (
+            <div className={`flex flex-col gap-1 ${m.text ? 'mt-1.5' : ''}`}>
+              {m.hostedImages.map((u) => {
+                const data = hostedContents[u];
+                if (data) {
+                  return (
+                    <img
+                      key={u}
+                      src={data}
+                      alt=""
+                      onLoad={onContentResize}
+                      style={{ maxHeight: 320 }}
+                      className="rounded-xl max-w-full object-contain"
+                    />
+                  );
+                }
+                return (
+                  <div
+                    key={u}
+                    className="rounded-xl bg-background/20 border border-border/40 px-3 py-4 text-[11px] opacity-70 flex items-center gap-2"
+                  >
+                    {data === null ? '⚠️ image unavailable' : (
+                      <>
+                        <span className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                        loading image…
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {!hasContent && <span className="opacity-50 italic">(no content)</span>}
           {m.attachments.length > 0 && (
             <div className="mt-1 space-y-0.5">
               {m.attachments.map((a, i) => (
@@ -434,7 +600,7 @@ function MessageBubble({
           onClick={() => (pickerOpen ? onClosePicker() : onOpenPicker())}
           className="w-6 h-6 flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
         >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="10" />
             <path d="M8 14s1.5 2 4 2 4-2 4-2" />
             <line x1="9" y1="9" x2="9.01" y2="9" />

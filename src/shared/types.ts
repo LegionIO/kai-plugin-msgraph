@@ -19,6 +19,7 @@ export interface GraphTokenData {
   expiresAt: number;
   /** AAD object id (from id_token oid claim). */
   objectId: string;
+  tenantId: string;
   email: string;
   displayName: string | null;
   /** Space-separated scp claim from the access token, for diagnostics. */
@@ -29,6 +30,8 @@ export interface AuthStatus {
   isAuthenticated: boolean;
   email: string | null;
   displayName: string | null;
+  objectId: string | null;
+  jobTitle: string | null;
   minutesRemaining: number | null;
   autoLoginStatus: string | null;
 }
@@ -51,6 +54,7 @@ export interface GraphUser {
   displayName?: string | null;
   userPrincipalName?: string | null;
   mail?: string | null;
+  jobTitle?: string | null;
 }
 
 export interface GraphChatMember {
@@ -71,6 +75,7 @@ export interface GraphChat {
   createdDateTime?: string;
   lastUpdatedDateTime?: string;
   webUrl?: string | null;
+  viewpoint?: { isHidden?: boolean; lastMessageReadDateTime?: string | null } | null;
   members?: GraphChatMember[];
   lastMessagePreview?: {
     id?: string;
@@ -95,7 +100,7 @@ export interface GraphMessage {
   messageType?: string;
   from?: { user?: { id?: string; displayName?: string } | null; application?: unknown } | null;
   body?: { contentType?: 'text' | 'html'; content?: string } | null;
-  attachments?: Array<{ id?: string; contentType?: string; name?: string; contentUrl?: string }>;
+  attachments?: Array<{ id?: string; contentType?: string; name?: string; contentUrl?: string; content?: string }>;
   mentions?: unknown[];
   reactions?: GraphReaction[];
 }
@@ -109,6 +114,7 @@ export interface NormalizedChat {
   lastUpdated: string | null;
   lastMessagePreview: string | null;
   lastMessageFrom: string | null;
+  unread: boolean;
   webUrl: string | null;
 }
 
@@ -128,8 +134,18 @@ export interface NormalizedMessage {
   fromMe: boolean;
   contentType: 'text' | 'html';
   text: string;
+  /** Auth-protected Graph hostedContents URLs extracted from inline <img> tags. */
+  hostedImages: string[];
+  replyTo: { id: string | null; senderName: string | null; text: string | null } | null;
   attachments: Array<{ name: string | null; contentType: string | null; url: string | null }>;
   reactions: NormalizedReaction[];
+  deleted: boolean;
+}
+
+export interface Presence {
+  availability: string;
+  activity: string;
+  statusMessage?: string | null;
 }
 
 // ── Plugin State ──
@@ -138,10 +154,17 @@ export interface MsgraphPluginState {
   mfa: MfaState;
   credentials: CredentialStatus;
   chats: NormalizedChat[];
+  chatsNextLink: string | null;
+  loadingMoreChats: boolean;
+  remoteSearch: { query: string; loading: boolean; results: NormalizedChat[] } | null;
   activeChatId: string | null;
   activeChatMessages: NormalizedMessage[];
   /** userId → data-URL (or null when the user has no photo, so we stop retrying). */
   photos: Record<string, string | null>;
+  /** userId → presence (availability/activity). */
+  presence: Record<string, Presence>;
+  /** hostedContent URL → data-URL (or null when fetch permanently failed). */
+  hostedContents: Record<string, string | null>;
   loadingChats: boolean;
   loadingMessages: boolean;
   sendingMessage: boolean;

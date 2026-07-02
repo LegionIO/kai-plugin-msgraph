@@ -13,8 +13,9 @@ export const AAD_NATIVE_REDIRECT = 'https://login.microsoftonline.com/common/oau
 // Interactive login uses the Teams client (proven to bypass consent in locked-down
 // tenants); Graph calls redeem the family refresh token as the Office client, whose
 // Graph .default preauth includes Chat.ReadWrite / Chat.Create / ChatMember.ReadWrite.
-export const CLIENT_ID_TEAMS  = '1fec8e78-bce4-4aaf-ab1b-5451cc387264';
-export const CLIENT_ID_OFFICE = 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+export const CLIENT_ID_TEAMS          = '1fec8e78-bce4-4aaf-ab1b-5451cc387264';
+export const CLIENT_ID_OFFICE         = 'd3590ed6-52b3-4102-aeff-aad2292ab01c';
+export const CLIENT_ID_OUTLOOK_MOBILE = '27922004-5251-4030-b22d-91ecd9a37ea4'; // Presence.Read.All
 export const AUTH_CLIENT_ID   = CLIENT_ID_TEAMS;
 export const GRAPH_CLIENT_ID  = CLIENT_ID_OFFICE;
 

@@ -4,10 +4,13 @@ import {
   ensureAccessToken,
   submitMfaCode,
   cancelMfaCode,
+  clearFociTokens,
 } from './auth.js';
 import * as tokenCache from './token-cache.js';
 import * as credentialStore from './credential-store.js';
 import * as photoCache from './photo-cache.js';
+import * as presenceCache from './presence-cache.js';
+import * as hostedContentCache from './hosted-content-cache.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import { buildMsgraphTools, ALL_TOOL_NAMES } from './tools.js';
 import { setLogger, getLogger } from './logger-singleton.js';
@@ -32,6 +35,8 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let unsubConfig: (() => void) | null = null;
 let hadValidTokenSinceLogout = false;
 let messageLoadSeq = 0;
+let remoteSearchSeq = 0;
+let meJobTitle: string | null = null;
 
 // ── Config helpers ──
 
@@ -59,13 +64,20 @@ function initialState(): MsgraphPluginState {
       isAuthenticated: false,
       email: null,
       displayName: null,
+      objectId: null,
+      jobTitle: null,
       minutesRemaining: null,
       autoLoginStatus: null,
     },
     mfa: { needed: false, type: null, approvalNumber: null },
     credentials: { hasCredentials: false, username: null, encryptionMethod: 'none' },
     photos: {},
+    presence: {},
+    hostedContents: {},
     chats: [],
+    chatsNextLink: null,
+    loadingMoreChats: false,
+    remoteSearch: null,
     activeChatId: null,
     activeChatMessages: [],
     loadingChats: false,
@@ -80,6 +92,8 @@ function publishAuthState(api: PluginAPI): void {
     isAuthenticated: tokenCache.isTokenValid() || tokenCache.hasRefreshToken(),
     email: tokenCache.getEmail(),
     displayName: tokenCache.getDisplayName(),
+    objectId: tokenCache.getObjectId(),
+    jobTitle: meJobTitle,
     minutesRemaining: tokenCache.minutesRemaining(),
     autoLoginStatus: null,
   });
@@ -87,6 +101,17 @@ function publishAuthState(api: PluginAPI): void {
 
 function publishCredentialState(api: PluginAPI): void {
   api.state.set('credentials', credentialStore.getCredentialStatus(api));
+}
+
+function updateNavBadge(api: PluginAPI): void {
+  const chats = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
+  const unread = chats.reduce((n, c) => n + (c.unread ? 1 : 0), 0);
+  api.ui.registerNavigationItem({
+    id: NAV_ID,
+    visible: true,
+    badge: unread > 0 ? unread : undefined,
+    target: { type: 'panel', panelId: PANEL_ID },
+  });
 }
 
 // ── Client / auth wiring ──
@@ -128,6 +153,17 @@ function registerEnabledTools(api: PluginAPI): void {
   );
 }
 
+async function refreshMeProfile(api: PluginAPI): Promise<void> {
+  try {
+    const client = await ensureAuthenticated(api, false);
+    const me = await client.getMe();
+    meJobTitle = me.jobTitle ?? null;
+    publishAuthState(api);
+  } catch (err) {
+    getLogger().warn(`refreshMeProfile failed: ${err}`);
+  }
+}
+
 // ── Data loaders ──
 
 async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void> {
@@ -137,15 +173,18 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
   api.state.set('error', null);
   try {
     const client = await ensureAuthenticated(api, allowInteractive);
-    const raw = await client.listChats({});
+    const { chats: raw, nextLink } = await client.listChats({});
     if (session !== tokenCache.currentSession()) return;
     const myId = tokenCache.getObjectId();
     const chats = raw.map((c) => normalizeChat(c, myId));
     api.state.set('chats', chats);
+    api.state.set('chatsNextLink', nextLink);
+    updateNavBadge(api);
     const ids = new Set<string>();
     if (myId) ids.add(myId);
     for (const c of chats) for (const m of c.members) ids.add(m.id);
     photoCache.ensure(api, client, ids);
+    presenceCache.refresh(api, client, ids);
   } catch (err) {
     if (session === tokenCache.currentSession()) {
       api.state.set('error', err instanceof Error ? err.message : String(err));
@@ -170,11 +209,18 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
     const normalized = msgs
       .filter((m) => m.messageType === 'message' || m.messageType == null)
       .map((m) => normalizeMessage(m, myId))
+      .filter((m) => !m.deleted)
       .reverse();
     api.state.set('activeChatMessages', normalized);
     const ids = new Set<string>();
-    for (const m of normalized) if (m.fromId) ids.add(m.fromId);
+    const hosted = new Set<string>();
+    for (const m of normalized) {
+      if (m.fromId) ids.add(m.fromId);
+      for (const u of m.hostedImages) hosted.add(u);
+    }
     photoCache.ensure(api, client, ids);
+    presenceCache.refresh(api, client, ids);
+    hostedContentCache.ensure(api, client, hosted);
   } catch (err) {
     if (seq !== messageLoadSeq) return;
     api.state.set('error', err instanceof Error ? err.message : String(err));
@@ -195,27 +241,118 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         hadValidTokenSinceLogout = true;
         publishAuthState(api);
         await loadChats(api, true);
+        void refreshMeProfile(api);
         break;
       }
       case 'logout': {
         tokenCache.invalidateSession();
         messageLoadSeq++;
+        remoteSearchSeq++;
+        meJobTitle = null;
         cancelMfaCode();
+        clearFociTokens();
         tokenCache.clear();
         tokenCache.persist(api);
         photoCache.clear();
+        presenceCache.clear();
+        hostedContentCache.clear();
         hadValidTokenSinceLogout = false;
         api.state.replace(initialState() as unknown as Record<string, unknown>);
         publishCredentialState(api);
+        updateNavBadge(api);
         break;
       }
       case 'refresh-chats': {
         await loadChats(api, true);
         break;
       }
+      case 'load-more-chats': {
+        const st = api.state.get() as Partial<MsgraphPluginState>;
+        const link = st.chatsNextLink;
+        if (!link || st.loadingMoreChats) break;
+        api.state.set('loadingMoreChats', true);
+        try {
+          const client = await ensureAuthenticated(api, false);
+          const session = tokenCache.currentSession();
+          const { chats: raw, nextLink } = await client.listChatsPage(link);
+          if (session !== tokenCache.currentSession()) break;
+          const myId = tokenCache.getObjectId();
+          const existing = (api.state.get() as Partial<MsgraphPluginState>).chats ?? [];
+          const seen = new Set(existing.map((c) => c.id));
+          const more = raw.map((c) => normalizeChat(c, myId)).filter((c) => !seen.has(c.id));
+          api.state.set('chats', [...existing, ...more]);
+          api.state.set('chatsNextLink', nextLink);
+          updateNavBadge(api);
+          const ids = new Set<string>();
+          for (const c of more) for (const m of c.members) ids.add(m.id);
+          photoCache.ensure(api, client, ids);
+          presenceCache.refresh(api, client, ids);
+        } finally {
+          api.state.set('loadingMoreChats', false);
+        }
+        break;
+      }
+      case 'search-chats': {
+        const { query } = data as { query: string };
+        const q = query.trim();
+        const seq = ++remoteSearchSeq;
+        if (q.length < 2) {
+          api.state.set('remoteSearch', null);
+          break;
+        }
+        api.state.set('remoteSearch', { query: q, loading: true, results: [] });
+        try {
+          const client = await ensureAuthenticated(api, false);
+          const myId = tokenCache.getObjectId();
+          let users: import('../shared/types.js').GraphUser[] = [];
+          if (q.includes('@')) {
+            const u = await client.getUserByEmail(q);
+            if (u) users = [u];
+          }
+          if (users.length === 0) {
+            users = await client.findUsers(q, 25);
+          }
+          if (seq !== remoteSearchSeq) return;
+          const probes = await Promise.allSettled(
+            users.filter((u) => u.id && u.id !== myId).map((u) => client.probeOneOnOne(u.id)),
+          );
+          if (seq !== remoteSearchSeq) return;
+          const results = probes
+            .flatMap((p) => (p.status === 'fulfilled' && p.value ? [normalizeChat(p.value, myId)] : []))
+            .sort((a, b) => (b.lastUpdated ?? '').localeCompare(a.lastUpdated ?? ''));
+          api.state.set('remoteSearch', { query: q, loading: false, results });
+          const ids = new Set<string>();
+          for (const c of results) for (const m of c.members) ids.add(m.id);
+          photoCache.ensure(api, client, ids);
+          presenceCache.refresh(api, client, ids);
+        } catch (err) {
+          if (seq === remoteSearchSeq) {
+            api.state.set('remoteSearch', { query: q, loading: false, results: [] });
+            log.warn(`search-chats failed: ${err}`);
+          }
+        }
+        break;
+      }
+      case 'clear-search': {
+        remoteSearchSeq++;
+        api.state.set('remoteSearch', null);
+        break;
+      }
       case 'select-chat': {
         const { chatId } = data as { chatId: string };
         await loadMessages(api, chatId);
+        // Optimistically clear the unread dot, then tell Graph.
+        const chats = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []).map((c) =>
+          c.id === chatId ? { ...c, unread: false } : c,
+        );
+        api.state.set('chats', chats);
+        updateNavBadge(api);
+        try {
+          const client = await ensureAuthenticated(api, false);
+          await client.markChatRead(chatId);
+        } catch (err) {
+          log.warn(`markChatRead failed: ${err}`);
+        }
         break;
       }
       case 'send-message': {
@@ -380,6 +517,7 @@ export async function activate(api: PluginAPI): Promise<void> {
         await acquireTokenSilent(api);
         publishAuthState(api);
         await loadChats(api);
+        await refreshMeProfile(api);
       } catch (err) {
         log.warn(`Startup silent refresh failed: ${err}`);
         publishAuthState(api);

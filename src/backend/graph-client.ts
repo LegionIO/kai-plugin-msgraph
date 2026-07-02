@@ -1,4 +1,4 @@
-import { GRAPH_BASE_URL, DEFAULT_CHAT_LIST_TOP, DEFAULT_MESSAGE_TOP } from '../shared/constants.js';
+import { GRAPH_BASE_URL, DEFAULT_CHAT_LIST_TOP, DEFAULT_MESSAGE_TOP, CLIENT_ID_OUTLOOK_MOBILE } from '../shared/constants.js';
 import type {
   PluginAPI,
   GraphUser,
@@ -9,9 +9,10 @@ import type {
   NormalizedChat,
   NormalizedMessage,
   NormalizedReaction,
+  Presence,
 } from '../shared/types.js';
 import { GraphApiError, TokenExpiredError } from '../shared/types.js';
-import { ensureAccessToken, forceRefresh } from './auth.js';
+import { ensureAccessToken, forceRefresh, acquireFociAccessToken } from './auth.js';
 import * as tokenCache from './token-cache.js';
 import { getLogger } from './logger-singleton.js';
 
@@ -90,7 +91,7 @@ export class GraphClient {
 
   async getMe(): Promise<GraphUser> {
     return this.request<GraphUser>('GET', '/me', {
-      query: { $select: 'id,displayName,userPrincipalName,mail' },
+      query: { $select: 'id,displayName,userPrincipalName,mail,jobTitle' },
     });
   }
 
@@ -144,7 +145,9 @@ export class GraphClient {
 
   // ── Chats ──
 
-  async listChats(opts: { chatType?: GraphChatType; top?: number } = {}): Promise<GraphChat[]> {
+  async listChats(
+    opts: { chatType?: GraphChatType; top?: number } = {},
+  ): Promise<{ chats: GraphChat[]; nextLink: string | null }> {
     // Graph caps /me/chats $top at 50 and members-expansion truncates large groups.
     const top = Math.min(Math.max(opts.top ?? DEFAULT_CHAT_LIST_TOP, 1), 50);
     const query: Record<string, string> = {
@@ -154,12 +157,17 @@ export class GraphClient {
     };
     if (opts.chatType) query.$filter = `chatType eq '${opts.chatType}'`;
     const r = await this.request<GraphList<GraphChat>>('GET', '/me/chats', { query });
-    return r.value;
+    return { chats: r.value, nextLink: r['@odata.nextLink'] ?? null };
+  }
+
+  async listChatsPage(nextLink: string): Promise<{ chats: GraphChat[]; nextLink: string | null }> {
+    const r = await this.request<GraphList<GraphChat>>('GET', nextLink);
+    return { chats: r.value, nextLink: r['@odata.nextLink'] ?? null };
   }
 
   async getChat(chatId: string): Promise<GraphChat> {
     return this.request<GraphChat>('GET', `/chats/${encodeURIComponent(chatId)}`, {
-      query: { $expand: 'members' },
+      query: { $expand: 'members,lastMessagePreview' },
     });
   }
 
@@ -167,9 +175,22 @@ export class GraphClient {
     const r = await this.request<GraphList<GraphMessage>>(
       'GET',
       `/chats/${encodeURIComponent(chatId)}/messages`,
-      { query: { $top: String(top) } },
+      { query: { $top: String(top), $orderby: 'createdDateTime desc' } },
     );
     return r.value;
+  }
+
+  /** Fetch an auth-protected Graph hostedContents/$value URL and return a data URL. */
+  async getHostedContent(url: string): Promise<string> {
+    if (!url.startsWith('https://graph.microsoft.com/')) {
+      throw new GraphApiError(`Refusing non-Graph hosted content URL`, 0);
+    }
+    const token = await ensureAccessToken(this.api, { allowInteractive: false });
+    const resp = await this.fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!resp.ok) throw new GraphApiError(`GET hostedContent → ${resp.status}`, resp.status);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const ct = resp.headers.get('content-type') || 'image/png';
+    return `data:${ct};base64,${buf.toString('base64')}`;
   }
 
   async sendMessage(
@@ -196,6 +217,65 @@ export class GraphClient {
       `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/unsetReaction`,
       { body: { reactionType: toReactionGlyph(reactionType) } },
     );
+  }
+
+  async markChatRead(chatId: string): Promise<void> {
+    const id = tokenCache.getObjectId();
+    const tenantId = tokenCache.getTenantId();
+    if (!id || !tenantId) throw new Error('Not signed in');
+    await this.request<void>('POST', `/chats/${encodeURIComponent(chatId)}/markChatReadForUser`, {
+      body: { user: { id, tenantId } },
+    });
+  }
+
+  /** Batch presence lookup. Uses the Outlook Mobile FOCI client (only one with Presence.Read.All). */
+  async getPresences(userIds: string[]): Promise<Record<string, Presence>> {
+    if (userIds.length === 0) return {};
+    const token = await acquireFociAccessToken(this.api, CLIENT_ID_OUTLOOK_MOBILE);
+    const resp = await this.fetch(`${GRAPH_BASE_URL}/communications/getPresencesByUserId`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ ids: userIds }),
+    });
+    if (!resp.ok) {
+      throw new GraphApiError(`getPresencesByUserId → ${resp.status}`, resp.status);
+    }
+    const body = (await resp.json()) as {
+      value?: Array<{
+        id: string;
+        availability: string;
+        activity: string;
+        statusMessage?: { message?: { content?: string } | null } | null;
+      }>;
+    };
+    const out: Record<string, Presence> = {};
+    for (const p of body.value ?? []) {
+      const rawStatus = p.statusMessage?.message?.content ?? null;
+      out[p.id] = {
+        availability: p.availability,
+        activity: p.activity,
+        statusMessage: rawStatus ? stripHtml(rawStatus) || null : null,
+      };
+    }
+    return out;
+  }
+
+  /** Construct the deterministic 1:1 chat id and fetch it if it exists (does not create). */
+  async probeOneOnOne(otherUserId: string): Promise<GraphChat | null> {
+    const meId = tokenCache.getObjectId();
+    if (!meId) throw new Error('Not signed in');
+    const [a, b] = [meId, otherUserId].sort();
+    const chatId = `19:${a}_${b}@unq.gbl.spaces`;
+    try {
+      return await this.getChat(chatId);
+    } catch (err) {
+      if (err instanceof GraphApiError && (err.statusCode === 404 || err.statusCode === 403)) return null;
+      throw err;
+    }
   }
 
   /** Find or create the 1:1 chat with `otherUserId`. */
@@ -278,6 +358,14 @@ export class GraphClient {
 
 // ── Normalization helpers ──
 
+const HOSTED_IMG_RE = /<img\b[^>]*\bsrc\s*=\s*"(https:\/\/graph\.microsoft\.com\/[^"]*?\/hostedContents\/[^"]+?\/\$value)"/gi;
+
+function extractHostedImages(html: string): string[] {
+  const out: string[] = [];
+  for (const m of html.matchAll(HOSTED_IMG_RE)) out.push(m[1]);
+  return out;
+}
+
 function stripHtml(html: string): string {
   return html
     .replace(/<br\s*\/?>/gi, '\n')
@@ -303,14 +391,19 @@ export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat
     }))
     .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
   const previewBody = c.lastMessagePreview?.body?.content ?? null;
+  const lastMsgAt = c.lastMessagePreview?.createdDateTime ?? null;
+  const readAt = c.viewpoint?.lastMessageReadDateTime ?? null;
+  const lastFromMe = c.lastMessagePreview?.from?.user?.id === myId;
+  const unread = !!lastMsgAt && !lastFromMe && (!readAt || Date.parse(readAt) < Date.parse(lastMsgAt));
   return {
     id: c.id,
     type: c.chatType,
     topic: c.topic ?? (c.chatType === 'oneOnOne' ? members[0]?.displayName ?? null : null),
     members,
-    lastUpdated: c.lastMessagePreview?.createdDateTime ?? c.lastUpdatedDateTime ?? null,
+    lastUpdated: lastMsgAt ?? c.lastUpdatedDateTime ?? null,
     lastMessagePreview: previewBody ? stripHtml(previewBody).slice(0, 200) : null,
     lastMessageFrom: c.lastMessagePreview?.from?.user?.displayName ?? null,
+    unread,
     webUrl: c.webUrl ?? null,
   };
 }
@@ -352,10 +445,32 @@ function normalizeReactions(reactions: GraphReaction[] | undefined): NormalizedR
   return [...grouped.values()];
 }
 
+function parseMessageReference(content: string | undefined): NormalizedMessage['replyTo'] {
+  if (!content) return null;
+  try {
+    const j = JSON.parse(content) as {
+      messageId?: string;
+      messagePreview?: string;
+      messageSender?: { user?: { displayName?: string; id?: string } };
+    };
+    return {
+      id: j.messageId ?? null,
+      senderName: j.messageSender?.user?.displayName ?? null,
+      text: j.messagePreview ? stripHtml(j.messagePreview) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function normalizeMessage(m: GraphMessage, myId: string | null): NormalizedMessage {
   const fromId = m.from?.user?.id ?? null;
   const contentType = m.body?.contentType === 'html' ? 'html' : 'text';
   const raw = m.body?.content ?? '';
+  const hostedImages = contentType === 'html' ? extractHostedImages(raw) : [];
+  const refAttachment = (m.attachments ?? []).find((a) => a.contentType === 'messageReference');
+  const replyTo = refAttachment ? parseMessageReference(refAttachment.content) : null;
+  const attachments = (m.attachments ?? []).filter((a) => a.contentType !== 'messageReference');
   return {
     id: m.id,
     chatId: m.chatId ?? '',
@@ -365,11 +480,14 @@ export function normalizeMessage(m: GraphMessage, myId: string | null): Normaliz
     fromMe: !!myId && fromId === myId,
     contentType,
     text: contentType === 'html' ? stripHtml(raw) : raw,
-    attachments: (m.attachments ?? []).map((a) => ({
+    hostedImages,
+    replyTo,
+    attachments: attachments.map((a) => ({
       name: a.name ?? null,
       contentType: a.contentType ?? null,
       url: a.contentUrl ?? null,
     })),
     reactions: normalizeReactions(m.reactions),
+    deleted: !!m.deletedDateTime,
   };
 }
