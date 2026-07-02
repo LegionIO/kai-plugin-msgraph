@@ -14,4 +14,6 @@ token_cache.json
 /probe_*.py
 /teams-curls.txt
 /taskfetch_response.json
+/task_submit_response.json
+/execute_cards.json
 /trouter_events.jsonl
