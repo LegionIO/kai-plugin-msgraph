@@ -10,6 +10,8 @@ import { SelfMenu } from './SelfMenu.tsx';
 import { NewChatDialog } from './NewChatDialog.tsx';
 import { UserCard } from './UserCard.tsx';
 import { RichComposer } from '../editor/RichComposer.tsx';
+import { highlight } from '../highlight.ts';
+import { ensureSyntaxThemeInjected } from '../editor/syntax-theme.ts';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
@@ -30,6 +32,7 @@ function chatTitle(c: NormalizedChat): string {
 }
 
 export function PanelView({ pluginState, onAction }: Props) {
+  useEffect(ensureSyntaxThemeInjected, []);
   const s = pluginState ?? ({} as MsgraphPluginState);
   const photos = s.photos ?? {};
   const presence = s.presence ?? {};
@@ -506,54 +509,62 @@ function Segments({
           );
         }
         if (seg.type === 'codeblock') {
-          const lines = seg.code.split('\n');
-          return (
-            <div
-              key={i}
-              className="my-1.5 rounded-lg border border-border bg-card text-foreground overflow-hidden"
-              style={{ whiteSpace: 'normal' }}
-            >
-              <div className="flex items-center justify-between px-2.5 py-1 border-b border-border/60 bg-muted/40">
-                <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  {seg.lang ?? 'code'}
-                </span>
-                <button
-                  type="button"
-                  title="Copy"
-                  onClick={() => navigator.clipboard?.writeText(seg.code)}
-                  className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                  </svg>
-                </button>
-              </div>
-              <div
-                style={{
-                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                  fontSize: '0.8em',
-                  maxHeight: 320,
-                }}
-                className="overflow-auto"
-              >
-                {lines.map((ln, li) => (
-                  <div key={li} className="flex">
-                    <span
-                      style={{ minWidth: 32, userSelect: 'none' }}
-                      className="text-right pr-2 text-muted-foreground/60 shrink-0"
-                    >
-                      {li + 1}
-                    </span>
-                    <span style={{ whiteSpace: 'pre' }} className="pr-3">{ln || ' '}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
+          return <CodeBlock key={i} code={seg.code} lang={seg.lang} />;
         }
         return null;
       })}
     </>
+  );
+}
+
+function CodeBlock({ code, lang }: { code: string; lang: string | null }) {
+  const { html, displayName } = useMemo(() => highlight(code, lang), [code, lang]);
+  const lineCount = useMemo(() => code.split('\n').length, [code]);
+  const gutterWidth = 12 + String(lineCount).length * 7;
+  return (
+    <div
+      className="my-1.5 rounded-lg border border-border bg-card text-foreground overflow-hidden"
+      style={{ whiteSpace: 'normal' }}
+    >
+      <div className="flex items-center justify-between px-2.5 py-1 border-b border-border/60 bg-muted/40">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          {displayName ?? lang ?? 'code'}
+        </span>
+        <button
+          type="button"
+          title="Copy"
+          onClick={() => navigator.clipboard?.writeText(code)}
+          className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+        </button>
+      </div>
+      <div
+        style={{
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          fontSize: '0.8em',
+          lineHeight: 1.5,
+          maxHeight: 320,
+        }}
+        className="overflow-auto flex"
+      >
+        <div
+          style={{ minWidth: gutterWidth, userSelect: 'none' }}
+          className="text-right pr-2 pl-1.5 py-1.5 text-muted-foreground/50 shrink-0 border-r border-border/40"
+        >
+          {Array.from({ length: lineCount }, (_, i) => (
+            <div key={i}>{i + 1}</div>
+          ))}
+        </div>
+        <code
+          style={{ whiteSpace: 'pre', display: 'block' }}
+          className="px-3 py-1.5 flex-1"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      </div>
+    </div>
   );
 }
 

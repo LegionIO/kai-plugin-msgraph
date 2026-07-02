@@ -12,7 +12,10 @@ import {
   $insertNodes,
   $isLineBreakNode,
   $isTextNode,
+  COMMAND_PRIORITY_NORMAL,
   KEY_ARROW_DOWN_COMMAND,
+  KEY_ARROW_LEFT_COMMAND,
+  KEY_ARROW_RIGHT_COMMAND,
   KEY_ARROW_UP_COMMAND,
   KEY_ENTER_COMMAND,
   KEY_ESCAPE_COMMAND,
@@ -31,7 +34,12 @@ import { OnChangePlugin } from '@lexical/react/LexicalOnChangePlugin';
 import { MarkdownShortcutPlugin } from '@lexical/react/LexicalMarkdownShortcutPlugin';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import { mergeRegister } from '@lexical/utils';
-import { $createCodeNode, $isCodeNode, CodeNode, CodeHighlightNode } from '@lexical/code';
+import { $createCodeNode, $isCodeNode, CodeNode, CodeHighlightNode, registerCodeHighlighting } from '@lexical/code';
+import 'prismjs/components/prism-json';
+import 'prismjs/components/prism-yaml';
+import 'prismjs/components/prism-bash';
+import 'prismjs/components/prism-go';
+import 'prismjs/components/prism-diff';
 import { LinkNode, AutoLinkNode } from '@lexical/link';
 import { ListNode, ListItemNode } from '@lexical/list';
 import { HeadingNode, QuoteNode, DRAG_DROP_PASTE } from '@lexical/rich-text';
@@ -47,6 +55,7 @@ import { $setBlocksType } from '@lexical/selection';
 
 import { MentionNode, ImageNode, $createMentionNode, $createImageNodeFromFile, pendingImageFiles } from './nodes.tsx';
 import { serializeToTeams, type SerializedPayload } from './serialize.ts';
+import { lexicalCodeHighlightTheme, ensureSyntaxThemeInjected } from './syntax-theme.ts';
 import { Avatar } from '../components/Avatar.tsx';
 import type { MsgraphPluginState, Presence } from '../../shared/types.ts';
 
@@ -61,7 +70,8 @@ const theme = {
     underline: 'underline',
     code: 'font-mono text-xs px-1 py-0.5 rounded bg-background/60 border border-border/60',
   },
-  code: 'block font-mono text-xs rounded-lg border border-border bg-card px-2.5 py-2 my-1 whitespace-pre-wrap',
+  code: 'msg-editor-code block font-mono text-xs rounded-lg border border-border bg-card px-2.5 py-2 my-1 whitespace-pre-wrap',
+  codeHighlight: lexicalCodeHighlightTheme,
 };
 
 const MD_TRANSFORMERS = [
@@ -83,7 +93,14 @@ export interface RichComposerProps {
   presence: Record<string, Presence>;
 }
 
+function CodeHighlightPlugin() {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => registerCodeHighlighting(editor), [editor]);
+  return null;
+}
+
 export function RichComposer(props: RichComposerProps) {
+  useEffect(ensureSyntaxThemeInjected, []);
   const initialConfig: InitialConfigType = {
     namespace: 'msgraph-composer',
     theme,
@@ -305,6 +322,7 @@ function ComposerInner({
               });
             }}
           />
+          <CodeHighlightPlugin />
           <CodeBlockEscapePlugin />
           <FenceTransformPlugin />
           <MentionTypeahead
@@ -432,17 +450,23 @@ function CodeBlockEscapePlugin() {
   const [editor] = useLexicalComposerContext();
   useEffect(() => {
     const escape = (dir: 'up' | 'down') => (ev: KeyboardEvent | null | undefined) => {
+      if (ev?.altKey || ev?.shiftKey) return false;
       const sel = $getSelection();
       if (!$isRangeSelection(sel) || !sel.isCollapsed()) return false;
       const anchor = sel.anchor.getNode();
       const block = anchor.getTopLevelElement();
       if (!block || !$isCodeNode(block)) return false;
-      const atStart = dir === 'up' && block.getFirstDescendant()?.getKey() === anchor.getKey() && sel.anchor.offset === 0;
+      const first = block.getFirstDescendant();
       const last = block.getLastDescendant();
+      const atStart =
+        dir === 'up' &&
+        (first === null || (first.getKey() === anchor.getKey() && sel.anchor.offset === 0));
       const atEnd =
         dir === 'down' &&
-        last?.getKey() === anchor.getKey() &&
-        sel.anchor.offset === anchor.getTextContentSize();
+        (last === null ||
+          (last.getKey() === anchor.getKey() && sel.anchor.offset === anchor.getTextContentSize()) ||
+          ($isLineBreakNode(last) && last.getPreviousSibling()?.getKey() === anchor.getKey() &&
+            sel.anchor.offset === anchor.getTextContentSize()));
       if (!atStart && !atEnd) return false;
       const sib = dir === 'down' ? block.getNextSibling() : block.getPreviousSibling();
       ev?.preventDefault();
@@ -457,8 +481,10 @@ function CodeBlockEscapePlugin() {
       return true;
     };
     return mergeRegister(
-      editor.registerCommand(KEY_ARROW_DOWN_COMMAND, escape('down'), COMMAND_PRIORITY_LOW),
-      editor.registerCommand(KEY_ARROW_UP_COMMAND, escape('up'), COMMAND_PRIORITY_LOW),
+      editor.registerCommand(KEY_ARROW_DOWN_COMMAND, escape('down'), COMMAND_PRIORITY_NORMAL),
+      editor.registerCommand(KEY_ARROW_RIGHT_COMMAND, escape('down'), COMMAND_PRIORITY_NORMAL),
+      editor.registerCommand(KEY_ARROW_UP_COMMAND, escape('up'), COMMAND_PRIORITY_NORMAL),
+      editor.registerCommand(KEY_ARROW_LEFT_COMMAND, escape('up'), COMMAND_PRIORITY_NORMAL),
     );
   }, [editor]);
   return null;
