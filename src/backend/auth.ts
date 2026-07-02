@@ -111,6 +111,7 @@ function buildTokenData(tr: TokenResponse, prevRefreshToken?: string | null): Gr
 export async function acquireTokenSilent(api: PluginAPI): Promise<GraphTokenData> {
   const rt = tokenCache.getRefreshToken();
   if (!rt) throw new Error('No refresh token available');
+  const session = tokenCache.currentSession();
 
   getLogger().info('acquireTokenSilent: redeeming refresh token via Office client (FOCI)');
   let tr: TokenResponse;
@@ -134,6 +135,9 @@ export async function acquireTokenSilent(api: PluginAPI): Promise<GraphTokenData
   }
 
   const token = buildTokenData(tr, rt);
+  if (session !== tokenCache.currentSession()) {
+    throw new Error('Session invalidated during refresh');
+  }
   tokenCache.set(token);
   tokenCache.persist(api);
   getLogger().info(`Silent refresh ok for ${token.email} (scp="${token.scopes.slice(0, 120)}…")`);
@@ -163,7 +167,8 @@ export async function acquireTokenInteractive(
   }
 
   if (inFlight) return inFlight;
-  const run = doInteractive(api);
+  const session = tokenCache.currentSession();
+  const run = doInteractive(api, session);
   inFlight = run;
   try {
     return await run;
@@ -172,7 +177,7 @@ export async function acquireTokenInteractive(
   }
 }
 
-async function doInteractive(api: PluginAPI): Promise<GraphTokenData> {
+async function doInteractive(api: PluginAPI, session: number): Promise<GraphTokenData> {
   const shouldAutoLogin = hasCredentials(api);
   const state = randomBytes(16).toString('hex');
   const codeVerifier = randomBytes(32).toString('base64url');
@@ -253,8 +258,10 @@ async function doInteractive(api: PluginAPI): Promise<GraphTokenData> {
         getURL: helpers.getURL,
         show: helpers.show,
       };
+      const live = () => session === tokenCache.currentSession();
       const callbacks: AutoLoginCallbacks = {
         onMfaCodeNeeded: (type) => {
+          if (!live()) return Promise.reject(new Error('Signed out'));
           api.state.set('mfa', { needed: true, type, approvalNumber: null } satisfies MfaState);
           return new Promise<string>((resolve, reject) => {
             mfaCodeResolve = resolve;
@@ -268,20 +275,20 @@ async function doInteractive(api: PluginAPI): Promise<GraphTokenData> {
           });
         },
         onMfaApprovalNeeded: (approvalNumber) => {
-          api.state.set('mfa', { needed: true, type: 'push', approvalNumber: approvalNumber ?? null } satisfies MfaState);
+          if (live()) api.state.set('mfa', { needed: true, type: 'push', approvalNumber: approvalNumber ?? null } satisfies MfaState);
         },
         onMfaApprovalComplete: () => {
-          api.state.set('mfa', { needed: false, type: null, approvalNumber: null } satisfies MfaState);
+          if (live()) api.state.set('mfa', { needed: false, type: null, approvalNumber: null } satisfies MfaState);
         },
         onFallback: (reason) => {
           getLogger().warn(`Auto-login fallback: ${reason}`);
-          api.state.set('auth.autoLoginStatus', `Fallback: ${reason}`);
+          if (live()) api.state.set('auth.autoLoginStatus', `Fallback: ${reason}`);
         },
       };
 
       let autoLoginAttempted = false;
       const tryAutoLogin = (url: string) => {
-        if (autoLoginAttempted || codeSettled) return;
+        if (autoLoginAttempted || codeSettled || !live()) return;
         if (isRedirect(url)) return;
         if (!isMicrosoftLoginHost(url)) return;
         autoLoginAttempted = true;
@@ -314,8 +321,10 @@ async function doInteractive(api: PluginAPI): Promise<GraphTokenData> {
   try {
     code = await codePromise;
   } finally {
-    api.state.set('mfa', { needed: false, type: null, approvalNumber: null } satisfies MfaState);
-    api.state.set('auth.autoLoginStatus', null);
+    if (session === tokenCache.currentSession()) {
+      api.state.set('mfa', { needed: false, type: null, approvalNumber: null } satisfies MfaState);
+      api.state.set('auth.autoLoginStatus', null);
+    }
     // Ensure the window promise doesn't dangle unhandled.
     authPromise.catch(() => {});
   }
@@ -334,6 +343,9 @@ async function doInteractive(api: PluginAPI): Promise<GraphTokenData> {
   if (!token.refreshToken) {
     throw new Error('No refresh_token returned; ensure offline_access scope was granted');
   }
+  if (session !== tokenCache.currentSession()) {
+    throw new Error('Sign-in cancelled');
+  }
   tokenCache.set(token);
   tokenCache.persist(api);
 
@@ -342,6 +354,9 @@ async function doInteractive(api: PluginAPI): Promise<GraphTokenData> {
   } catch (err) {
     getLogger().warn(`Post-login FOCI redemption failed (${err}); continuing with auth-client token`);
   }
+  if (session !== tokenCache.currentSession()) {
+    throw new Error('Signed out');
+  }
 
   getLogger().info(`Signed in as ${token.email} (expires ${new Date(token.expiresAt).toISOString()})`);
   return token;
@@ -349,16 +364,31 @@ async function doInteractive(api: PluginAPI): Promise<GraphTokenData> {
 
 // ── Public: ensure a valid Graph access token, refreshing automatically ──
 
-export async function ensureAccessToken(api: PluginAPI): Promise<string> {
+export interface EnsureOptions {
+  /** When false, never open an auth window; throw instead. Background paths must pass false. */
+  allowInteractive?: boolean;
+}
+
+export async function ensureAccessToken(api: PluginAPI, opts: EnsureOptions = {}): Promise<string> {
   const at = tokenCache.getValidAccessToken();
   if (at) return at;
+  const session = tokenCache.currentSession();
   if (tokenCache.hasRefreshToken()) {
     try {
       const t = await acquireTokenSilent(api);
       return t.accessToken;
     } catch (err) {
       getLogger().warn(`Silent refresh failed: ${err}`);
+      if (opts.allowInteractive === false) {
+        throw new Error(`Silent refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
+  }
+  if (session !== tokenCache.currentSession()) {
+    throw new Error('Signed out');
+  }
+  if (opts.allowInteractive === false) {
+    throw new Error('Not signed in. Please log in via the Teams panel.');
   }
   const t = await acquireTokenInteractive(api);
   return t.accessToken;

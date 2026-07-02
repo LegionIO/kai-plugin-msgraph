@@ -23,7 +23,10 @@ interface GraphList<T> {
 }
 
 export class GraphClient {
-  constructor(private readonly api: PluginAPI) {}
+  constructor(
+    private readonly api: PluginAPI,
+    private readonly allowInteractive = true,
+  ) {}
 
   private get fetch(): Fetch {
     return this.api.fetch;
@@ -35,7 +38,7 @@ export class GraphClient {
     opts: { query?: Record<string, string>; headers?: Record<string, string>; body?: unknown } = {},
     retried = false,
   ): Promise<T> {
-    const token = await ensureAccessToken(this.api);
+    const token = await ensureAccessToken(this.api, { allowInteractive: this.allowInteractive });
     const url = path.startsWith('http')
       ? path
       : `${GRAPH_BASE_URL}${path}${opts.query ? '?' + new URLSearchParams(opts.query).toString() : ''}`;
@@ -102,17 +105,20 @@ export class GraphClient {
     return r.value;
   }
 
-  /** Returns a data:image/* URL for the user's 48×48 profile photo, or null if none. */
-  async getUserPhoto(userId: string): Promise<string | null> {
-    const token = await ensureAccessToken(this.api);
+  /** Returns a data:image/* URL for the user's 48×48 profile photo, or null when the user has none. Throws on transient errors so callers can retry later. */
+  async getUserPhoto(userId: string, retried = false): Promise<string | null> {
+    const token = await ensureAccessToken(this.api, { allowInteractive: false });
     const path = userId === tokenCache.getObjectId() ? '/me' : `/users/${encodeURIComponent(userId)}`;
     const resp = await this.fetch(`${GRAPH_BASE_URL}${path}/photos/48x48/$value`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (resp.status === 404) return null;
+    if (resp.status === 401 && !retried) {
+      await forceRefresh(this.api);
+      return this.getUserPhoto(userId, true);
+    }
     if (!resp.ok) {
-      getLogger().warn(`getUserPhoto(${userId}) → ${resp.status}`);
-      return null;
+      throw new GraphApiError(`GET ${path}/photos → ${resp.status}`, resp.status);
     }
     const buf = Buffer.from(await resp.arrayBuffer());
     const ct = resp.headers.get('content-type') || 'image/jpeg';
@@ -133,10 +139,12 @@ export class GraphClient {
   // ── Chats ──
 
   async listChats(opts: { chatType?: GraphChatType; top?: number } = {}): Promise<GraphChat[]> {
+    // Graph caps /me/chats $top at 50 and members-expansion truncates large groups.
+    const top = Math.min(Math.max(opts.top ?? DEFAULT_CHAT_LIST_TOP, 1), 50);
     const query: Record<string, string> = {
       $expand: 'members,lastMessagePreview',
       $orderby: 'lastMessagePreview/createdDateTime desc',
-      $top: String(opts.top ?? DEFAULT_CHAT_LIST_TOP),
+      $top: String(top),
     };
     if (opts.chatType) query.$filter = `chatType eq '${opts.chatType}'`;
     const r = await this.request<GraphList<GraphChat>>('GET', '/me/chats', { query });

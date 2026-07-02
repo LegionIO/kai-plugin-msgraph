@@ -168,12 +168,13 @@ async function waitForState(
 async function clickAccountTile(helpers: AutoLoginHelpers, username: string): Promise<boolean> {
   return await helpers.executeJavaScript(`
     (function() {
-      var matchingTile = document.querySelector('[data-test-id="${username}"]');
+      var uname = ${JSON.stringify(username)};
+      var matchingTile = document.querySelector('[data-test-id="' + CSS.escape(uname) + '"]');
       if (matchingTile) { matchingTile.click(); return true; }
       var tiles = document.querySelectorAll('${SELECTORS.ACCOUNT_PICKER_TILES} .tile .table');
       for (var i = 0; i < tiles.length; i++) {
         var text = tiles[i].textContent || '';
-        if (text.includes(${JSON.stringify(username)})) { tiles[i].click(); return true; }
+        if (text.includes(uname)) { tiles[i].click(); return true; }
       }
       var otherTile = document.querySelector('${SELECTORS.ACCOUNT_PICKER_OTHER_TILE}');
       if (otherTile) { otherTile.click(); return false; }

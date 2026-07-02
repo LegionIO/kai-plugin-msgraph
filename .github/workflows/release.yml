@@ -1,0 +1,187 @@
+name: Release Plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbump:
+        description: 'Version bump to apply'
+        required: true
+        default: patch
+        type: choice
+        options:
+          - none
+          - major
+          - minor
+          - patch
+
+concurrency:
+  group: plugin-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get current version
+        id: current_version
+        run: |
+          current=$(jq -r '.version' plugin.json)
+          echo "version=$current" >> "$GITHUB_OUTPUT"
+          echo "Current version: $current"
+
+      - name: Bump version
+        id: bump_version
+        if: ${{ inputs.verbump != 'none' }}
+        run: |
+          current="${{ steps.current_version.outputs.version }}"
+          IFS='.' read -r major minor patch <<< "$current"
+
+          case "${{ inputs.verbump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          new_version="${major}.${minor}.${patch}"
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "New version: $new_version"
+
+          jq ".version = \"$new_version\"" plugin.json > plugin.json.tmp
+          mv plugin.json.tmp plugin.json
+
+          if [ -f "package.json" ]; then
+            jq ".version = \"$new_version\"" package.json > package.json.tmp
+            mv package.json.tmp package.json
+          fi
+          if [ -f "package-lock.json" ]; then
+            jq ".version = \"$new_version\" | .packages[\"\"].version = \"$new_version\"" package-lock.json > package-lock.json.tmp
+            mv package-lock.json.tmp package-lock.json
+          fi
+
+      - name: Set release version
+        id: version
+        run: |
+          if [ "${{ inputs.verbump }}" = "none" ]; then
+            version="${{ steps.current_version.outputs.version }}"
+          else
+            version="${{ steps.bump_version.outputs.version }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Release version: $version"
+
+      - name: Check tag/release status
+        id: check_tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --tags
+          tag="${{ steps.version.outputs.tag }}"
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+            if [ "${{ inputs.verbump }}" != "none" ]; then
+              echo "::error::Tag $tag already exists but a version bump was requested. Delete the tag or choose a different bump."
+              exit 1
+            fi
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "::error::Tag $tag and its release already exist. Bump the version or delete the release+tag."
+              exit 1
+            fi
+            tag_sha=$(git rev-parse "refs/tags/$tag^{commit}")
+            head_sha=$(git rev-parse HEAD)
+            if [ "$tag_sha" != "$head_sha" ]; then
+              echo "::error::Tag $tag points at $tag_sha but HEAD is $head_sha. Delete/move the tag or run with verbump."
+              exit 1
+            fi
+            echo "Tag $tag exists at HEAD without a release; will rebuild and publish."
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Get plugin name
+        id: plugin_info
+        run: |
+          plugin_name=$(jq -r '.name' plugin.json)
+          echo "name=$plugin_name" >> "$GITHUB_OUTPUT"
+          echo "Plugin name: $plugin_name"
+
+      - name: Package plugin
+        id: package
+        run: |
+          plugin_name="${{ steps.plugin_info.outputs.name }}"
+          version="${{ steps.version.outputs.version }}"
+          artifact_name="${plugin_name}-v${version}.tar.gz"
+          cd dist
+          tar -czf "../$artifact_name" .
+          cd ..
+          echo "artifact=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "Created artifact: $artifact_name ($(du -h "$artifact_name" | cut -f1))"
+
+      - name: Commit version bump
+        if: ${{ inputs.verbump != 'none' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugin.json
+          [ -f "package.json" ] && git add package.json
+          [ -f "package-lock.json" ] && git add package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m "release: v${{ steps.version.outputs.version }}"
+            git push origin "HEAD:${{ github.ref_name }}"
+          else
+            echo "No version changes to commit"
+          fi
+
+      - name: Create and push tag
+        if: steps.check_tag.outputs.tag_exists != 'true'
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          artifact="${{ steps.package.outputs.artifact }}"
+          gh release create "$tag" "$artifact" \
+            --title "$tag" \
+            --generate-notes \
+            --verify-tag
+
+      - name: Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Plugin**: ${{ steps.plugin_info.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact**: ${{ steps.package.outputs.artifact }}" >> $GITHUB_STEP_SUMMARY

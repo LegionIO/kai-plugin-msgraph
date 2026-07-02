@@ -1,5 +1,7 @@
 import type { PluginAPI } from '../shared/types.js';
+import { GraphApiError } from '../shared/types.js';
 import { GraphClient } from './graph-client.js';
+import * as tokenCache from './token-cache.js';
 import { getLogger } from './logger-singleton.js';
 
 /** userId → data URL, or null when confirmed no-photo. */
@@ -21,22 +23,29 @@ export function ensure(api: PluginAPI, client: GraphClient, userIds: Iterable<st
   const missing = [...new Set(userIds)].filter((id) => id && !cache.has(id) && !inFlight.has(id));
   if (missing.length === 0) return;
   for (const id of missing) inFlight.add(id);
+  const session = tokenCache.currentSession();
 
   void (async () => {
     let idx = 0;
     const workers = Array.from({ length: Math.min(CONCURRENCY, missing.length) }, async () => {
       while (idx < missing.length) {
+        if (session !== tokenCache.currentSession()) return;
         const id = missing[idx++];
         try {
           const url = await client.getUserPhoto(id);
-          cache.set(id, url);
+          if (session === tokenCache.currentSession()) cache.set(id, url);
         } catch (err) {
+          const status = err instanceof GraphApiError ? err.statusCode : 0;
+          if (status >= 400 && status < 500 && status !== 429 && session === tokenCache.currentSession()) {
+            // Permanent (403 no-permission, 400 bad id, etc.) — cache as no-photo.
+            cache.set(id, null);
+          }
+          // 429 / 5xx / network: leave uncached so a later ensure() retries.
           getLogger().warn(`photo fetch failed for ${id}: ${err}`);
-          cache.set(id, null);
         } finally {
           inFlight.delete(id);
         }
-        api.state.set('photos', get());
+        if (session === tokenCache.currentSession()) api.state.set('photos', get());
       }
     });
     await Promise.all(workers);

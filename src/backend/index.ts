@@ -31,6 +31,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let unsubConfig: (() => void) | null = null;
 let hadValidTokenSinceLogout = false;
+let messageLoadSeq = 0;
 
 // ── Config helpers ──
 
@@ -90,11 +91,11 @@ function publishCredentialState(api: PluginAPI): void {
 
 // ── Client / auth wiring ──
 
-async function ensureAuthenticated(api: PluginAPI): Promise<GraphClient> {
-  await ensureAccessToken(api);
+async function ensureAuthenticated(api: PluginAPI, allowInteractive = true): Promise<GraphClient> {
+  await ensureAccessToken(api, { allowInteractive });
   hadValidTokenSinceLogout = true;
   publishAuthState(api);
-  return new GraphClient(api);
+  return new GraphClient(api, allowInteractive);
 }
 
 // ── Tools ──
@@ -103,7 +104,7 @@ function registerEnabledTools(api: PluginAPI): void {
   const perms = getToolPermissions(api);
   const allTools = buildMsgraphTools({
     api,
-    ensureAuthenticated: () => ensureAuthenticated(api),
+    ensureAuthenticated: () => ensureAuthenticated(api, false),
   });
 
   const permMap: Record<string, keyof ToolPermissions> = {
@@ -129,13 +130,15 @@ function registerEnabledTools(api: PluginAPI): void {
 
 // ── Data loaders ──
 
-async function loadChats(api: PluginAPI): Promise<void> {
+async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void> {
   if (!tokenCache.hasRefreshToken() && !tokenCache.isTokenValid()) return;
+  const session = tokenCache.currentSession();
   api.state.set('loadingChats', true);
   api.state.set('error', null);
   try {
-    const client = await ensureAuthenticated(api);
+    const client = await ensureAuthenticated(api, allowInteractive);
     const raw = await client.listChats({});
+    if (session !== tokenCache.currentSession()) return;
     const myId = tokenCache.getObjectId();
     const chats = raw.map((c) => normalizeChat(c, myId));
     api.state.set('chats', chats);
@@ -144,19 +147,25 @@ async function loadChats(api: PluginAPI): Promise<void> {
     for (const c of chats) for (const m of c.members) ids.add(m.id);
     photoCache.ensure(api, client, ids);
   } catch (err) {
-    api.state.set('error', err instanceof Error ? err.message : String(err));
+    if (session === tokenCache.currentSession()) {
+      api.state.set('error', err instanceof Error ? err.message : String(err));
+    }
   } finally {
-    api.state.set('loadingChats', false);
+    if (session === tokenCache.currentSession()) api.state.set('loadingChats', false);
   }
 }
 
 async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
+  const seq = ++messageLoadSeq;
+  const current = (api.state.get() as Partial<MsgraphPluginState>).activeChatId;
   api.state.set('activeChatId', chatId);
+  if (current !== chatId) api.state.set('activeChatMessages', []);
   api.state.set('loadingMessages', true);
   api.state.set('error', null);
   try {
     const client = await ensureAuthenticated(api);
     const msgs = await client.getChatMessages(chatId, 40);
+    if (seq !== messageLoadSeq) return;
     const myId = tokenCache.getObjectId();
     const normalized = msgs
       .filter((m) => m.messageType === 'message' || m.messageType == null)
@@ -167,9 +176,10 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
     for (const m of normalized) if (m.fromId) ids.add(m.fromId);
     photoCache.ensure(api, client, ids);
   } catch (err) {
+    if (seq !== messageLoadSeq) return;
     api.state.set('error', err instanceof Error ? err.message : String(err));
   } finally {
-    api.state.set('loadingMessages', false);
+    if (seq === messageLoadSeq) api.state.set('loadingMessages', false);
   }
 }
 
@@ -184,10 +194,13 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         await acquireTokenInteractive(api, { forceRefresh: true });
         hadValidTokenSinceLogout = true;
         publishAuthState(api);
-        await loadChats(api);
+        await loadChats(api, true);
         break;
       }
       case 'logout': {
+        tokenCache.invalidateSession();
+        messageLoadSeq++;
+        cancelMfaCode();
         tokenCache.clear();
         tokenCache.persist(api);
         photoCache.clear();
@@ -197,7 +210,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         break;
       }
       case 'refresh-chats': {
-        await loadChats(api);
+        await loadChats(api, true);
         break;
       }
       case 'select-chat': {
@@ -211,7 +224,9 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         try {
           const client = await ensureAuthenticated(api);
           await client.sendMessage(chatId, text);
-          await loadMessages(api, chatId);
+          if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
+            await loadMessages(api, chatId);
+          }
         } finally {
           api.state.set('sendingMessage', false);
         }
@@ -224,7 +239,9 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         const client = await ensureAuthenticated(api);
         if (remove) await client.unsetReaction(chatId, messageId, reactionType);
         else await client.setReaction(chatId, messageId, reactionType);
-        await loadMessages(api, chatId);
+        if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
+          await loadMessages(api, chatId);
+        }
         break;
       }
       case 'submit-mfa-code': {
@@ -239,6 +256,12 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
       }
       case 'open-in-teams': {
         const { url } = data as { url: string };
+        let ok = false;
+        try {
+          const u = new URL(url);
+          ok = u.protocol === 'https:' && (u.hostname === 'teams.microsoft.com' || u.hostname.endsWith('.teams.microsoft.com'));
+        } catch { /* invalid */ }
+        if (!ok) throw new Error('Refusing to open non-Teams URL');
         await api.shell.openExternal(url);
         break;
       }

@@ -74,20 +74,22 @@ function getCredFilePath(pluginDir: string): string {
 }
 
 export function saveCredentials(api: PluginAPI, username: string, password: string): void {
+  const credPath = getCredFilePath(api.pluginDir);
   try {
     if (api.safeStorage.isEncryptionAvailable()) {
       const encrypted = api.safeStorage.encryptString(password);
       const creds: SafeStorageCreds = { username, encryptedPassword: encrypted, method: 'safeStorage' };
       api.config.setPluginData('encryptedCredentials', creds);
+      if (existsSync(credPath)) unlinkSync(credPath);
       getLogger().info(`Saved credentials via OS keychain for ${username}`);
       return;
     }
   } catch { /* fall through */ }
 
   const creds: AesCredentials = { username, ...encryptAes(password, deriveAesKey()) };
-  const credPath = getCredFilePath(api.pluginDir);
   writeFileSync(credPath, JSON.stringify(creds, null, 2), { encoding: 'utf-8', mode: 0o600 });
   try { chmodSync(credPath, 0o600); } catch { /* best effort */ }
+  api.config.setPluginData('encryptedCredentials', null);
   getLogger().info(`Saved credentials via AES-256-GCM fallback for ${username}`);
 }
 
@@ -98,8 +100,7 @@ export function getCredentials(api: PluginAPI): { username: string; password: st
       const password = api.safeStorage.decryptString(storedConfig.encryptedPassword);
       return { username: storedConfig.username, password };
     } catch (err) {
-      getLogger().error(`Failed to decrypt safeStorage credentials: ${err}`);
-      return null;
+      getLogger().error(`Failed to decrypt safeStorage credentials: ${err}; trying AES fallback`);
     }
   }
 

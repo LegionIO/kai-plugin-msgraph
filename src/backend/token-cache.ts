@@ -1,7 +1,18 @@
 import { TOKEN_REFRESH_BUFFER_MS } from '../shared/constants.js';
 import type { GraphTokenData, PluginAPI } from '../shared/types.js';
+import { getLogger } from './logger-singleton.js';
 
 let cached: GraphTokenData | null = null;
+/** Bumped on logout; async writers check this before committing. */
+let sessionGen = 0;
+
+export function currentSession(): number {
+  return sessionGen;
+}
+
+export function invalidateSession(): void {
+  sessionGen++;
+}
 
 export function get(): GraphTokenData | null {
   return cached;
@@ -53,15 +64,56 @@ export function getObjectId(): string | null {
   return cached?.objectId ?? null;
 }
 
+type PersistedToken = Omit<GraphTokenData, 'accessToken' | 'refreshToken'> & {
+  refreshTokenEnc?: string;
+};
+
 export function persist(api: PluginAPI): void {
-  api.config.setPluginData('graphToken', cached);
+  if (!cached) {
+    api.config.setPluginData('graphToken', null);
+    return;
+  }
+  const { accessToken: _at, refreshToken, ...rest } = cached;
+  void _at;
+  const out: PersistedToken = { ...rest };
+  try {
+    if (!api.safeStorage.isEncryptionAvailable()) throw new Error('safeStorage unavailable');
+    out.refreshTokenEnc = api.safeStorage.encryptString(refreshToken);
+  } catch (err) {
+    // Fail closed: keep the refresh token in memory only for this session.
+    getLogger().warn(`Not persisting refresh token (encryption unavailable): ${err}`);
+    api.config.setPluginData('graphToken', null);
+    return;
+  }
+  api.config.setPluginData('graphToken', out);
 }
 
 export function loadPersisted(api: PluginAPI): void {
   const data = api.config.getPluginData();
-  const stored = data.graphToken as GraphTokenData | null | undefined;
-  if (stored?.refreshToken) {
-    // Keep even if the access token is expired — the refresh token lets us mint a new one.
-    cached = stored;
+  const stored = data.graphToken as
+    | (PersistedToken & { refreshToken?: string; refreshTokenPlain?: string })
+    | null
+    | undefined;
+  if (!stored) return;
+  // Drop any legacy plaintext at rest.
+  if (stored.refreshToken || stored.refreshTokenPlain) {
+    api.config.setPluginData('graphToken', null);
+    return;
   }
+  if (!stored.refreshTokenEnc) return;
+  let refreshToken: string;
+  try {
+    refreshToken = api.safeStorage.decryptString(stored.refreshTokenEnc);
+  } catch {
+    return;
+  }
+  cached = {
+    accessToken: '',
+    refreshToken,
+    expiresAt: stored.expiresAt ?? 0,
+    objectId: stored.objectId ?? '',
+    email: stored.email ?? '',
+    displayName: stored.displayName ?? null,
+    scopes: stored.scopes ?? '',
+  };
 }

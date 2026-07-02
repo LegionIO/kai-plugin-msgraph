@@ -4,3 +4,10 @@ dist/
 __pycache__/
 token_cache.json
 *.log
+*.tar.gz
+
+# local exploration scripts (not part of the plugin)
+/auth.py
+/graph.py
+/send.py
+/foci_scan.py
