@@ -21,6 +21,11 @@ function errResult(err: unknown): { error: string } {
   return { error: message };
 }
 
+function clampTop(v: unknown, def: number, max: number): number {
+  const n = Number.isFinite(v as number) ? Math.floor(v as number) : def;
+  return Math.min(Math.max(n, 1), max);
+}
+
 async function resolveUser(client: GraphClient, ref: string): Promise<GraphUser> {
   const q = ref.trim();
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(q)) {
@@ -83,7 +88,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
         try {
           const client = await ensureAuthenticated();
           const { query, top } = input as { query: string; top?: number };
-          const users = await client.findUsers(query, Math.min(top ?? 10, 25));
+          const users = await client.findUsers(query, clampTop(top, 10, 25));
           return {
             success: true,
             count: users.length,
@@ -129,7 +134,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             filter?: string;
             top?: number;
           };
-          const raw = await client.listChats({ chatType, top });
+          const raw = await client.listChats({ chatType, top: clampTop(top, 50, 50) });
           const myId = tokenCache.getObjectId();
           let chats = raw.map((c) => normalizeChat(c, myId));
           if (filter) {
@@ -168,7 +173,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
         try {
           const client = await ensureAuthenticated();
           const { chatId, top } = input as { chatId: string; top?: number };
-          const msgs = await client.getChatMessages(chatId, Math.min(top ?? 25, 50));
+          const msgs = await client.getChatMessages(chatId, clampTop(top, 25, 50));
           const myId = tokenCache.getObjectId();
           const messages = msgs
             .filter((m) => m.messageType === 'message' || m.messageType == null)
@@ -197,7 +202,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
         try {
           const client = await ensureAuthenticated();
           const { query, top } = input as { query: string; top?: number };
-          const hits = await client.searchMessages(query, Math.min(top ?? 15, 25));
+          const hits = await client.searchMessages(query, clampTop(top, 15, 25));
           return { success: true, count: hits.length, hits };
         } catch (err) {
           return errResult(err);

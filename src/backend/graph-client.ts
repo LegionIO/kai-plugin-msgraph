@@ -39,9 +39,15 @@ export class GraphClient {
     retried = false,
   ): Promise<T> {
     const token = await ensureAccessToken(this.api, { allowInteractive: this.allowInteractive });
-    const url = path.startsWith('http')
-      ? path
-      : `${GRAPH_BASE_URL}${path}${opts.query ? '?' + new URLSearchParams(opts.query).toString() : ''}`;
+    let url: string;
+    if (/^https?:/i.test(path)) {
+      if (!path.startsWith('https://graph.microsoft.com/')) {
+        throw new GraphApiError(`Refusing to send Graph token to non-Graph URL: ${path}`, 0);
+      }
+      url = path;
+    } else {
+      url = `${GRAPH_BASE_URL}${path}${opts.query ? '?' + new URLSearchParams(opts.query).toString() : ''}`;
+    }
 
     const resp = await this.fetch(url, {
       method,

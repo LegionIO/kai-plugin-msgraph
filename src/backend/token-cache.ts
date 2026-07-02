@@ -96,7 +96,7 @@ export function loadPersisted(api: PluginAPI): void {
     | undefined;
   if (!stored) return;
   // Drop any legacy plaintext at rest.
-  if (stored.refreshToken || stored.refreshTokenPlain) {
+  if (stored.refreshToken || stored.refreshTokenPlain || (stored as { accessToken?: string }).accessToken) {
     api.config.setPluginData('graphToken', null);
     return;
   }

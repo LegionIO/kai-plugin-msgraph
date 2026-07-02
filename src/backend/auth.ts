@@ -266,8 +266,9 @@ async function doInteractive(api: PluginAPI, session: number): Promise<GraphToke
           return new Promise<string>((resolve, reject) => {
             mfaCodeResolve = resolve;
             mfaCodeReject = reject;
+            const thisReject = reject;
             setTimeout(() => {
-              if (mfaCodeReject) {
+              if (mfaCodeReject === thisReject) {
                 mfaCodeReject(new Error('MFA code entry timed out'));
                 mfaCodeResolve = null; mfaCodeReject = null;
               }
@@ -295,12 +296,12 @@ async function doInteractive(api: PluginAPI, session: number): Promise<GraphToke
         api.state.set('auth.autoLoginStatus', 'Auto-logging in…');
         performAutoLogin(autoLoginHelpers, credentials, callbacks)
           .then((r) => {
-            api.state.set('mfa', { needed: false, type: null, approvalNumber: null } satisfies MfaState);
+            if (live()) api.state.set('mfa', { needed: false, type: null, approvalNumber: null } satisfies MfaState);
             if (r.success) getLogger().info('Auto-login succeeded');
           })
           .catch((err) => {
             getLogger().error(`Auto-login error: ${err}`);
-            helpers.show();
+            if (live() && !codeSettled) helpers.show();
           });
       };
       helpers.onDidNavigate(tryAutoLogin);
