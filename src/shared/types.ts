@@ -156,7 +156,7 @@ export interface MsgraphPluginState {
   chats: NormalizedChat[];
   chatsNextLink: string | null;
   loadingMoreChats: boolean;
-  remoteSearch: { query: string; loading: boolean; results: NormalizedChat[] } | null;
+  remoteSearch: { query: string; loading: boolean; results: NormalizedChat[]; error?: string | null } | null;
   activeChatId: string | null;
   activeChatMessages: NormalizedMessage[];
   /** userId → data-URL (or null when the user has no photo, so we stop retrying). */

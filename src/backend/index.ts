@@ -310,6 +310,13 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
             if (u) users = [u];
           }
           if (users.length === 0) {
+            try {
+              users = await client.searchPeople(q, 10);
+            } catch (err) {
+              log.warn(`searchPeople failed (${err}); falling back to /users`);
+            }
+          }
+          if (users.length === 0) {
             users = await client.findUsers(q, 25);
           }
           if (seq !== remoteSearchSeq) return;
@@ -327,8 +334,9 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           presenceCache.refresh(api, client, ids);
         } catch (err) {
           if (seq === remoteSearchSeq) {
-            api.state.set('remoteSearch', { query: q, loading: false, results: [] });
-            log.warn(`search-chats failed: ${err}`);
+            const msg = err instanceof Error ? err.message : String(err);
+            api.state.set('remoteSearch', { query: q, loading: false, results: [], error: msg });
+            log.warn(`search-chats failed: ${msg}`);
           }
         }
         break;

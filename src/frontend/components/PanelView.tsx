@@ -272,6 +272,9 @@ export function PanelView({ pluginState, onAction }: Props) {
           {filter.trim() && remote?.loading && (
             <div className="px-3 py-2 text-[11px] text-muted-foreground animate-pulse">Searching directory…</div>
           )}
+          {filter.trim() && remote?.error && (
+            <div className="px-3 py-2 text-[11px] text-destructive">Search failed: {remote.error}</div>
+          )}
           {!s.loadingChats && chats.length === 0 && !(filter.trim() && remote?.loading) && (
             <div className="p-3 text-xs text-muted-foreground">
               {filter.trim() ? 'No matching chats' : 'No chats'}

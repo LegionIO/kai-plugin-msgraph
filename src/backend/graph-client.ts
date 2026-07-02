@@ -1,4 +1,4 @@
-import { GRAPH_BASE_URL, DEFAULT_CHAT_LIST_TOP, DEFAULT_MESSAGE_TOP, CLIENT_ID_OUTLOOK_MOBILE } from '../shared/constants.js';
+import { GRAPH_BASE_URL, DEFAULT_CHAT_LIST_TOP, DEFAULT_MESSAGE_TOP, CLIENT_ID_OUTLOOK_MOBILE, CLIENT_ID_TEAMS } from '../shared/constants.js';
 import type {
   PluginAPI,
   GraphUser,
@@ -87,6 +87,30 @@ export class GraphClient {
     return body as T;
   }
 
+  /**
+   * Token for /users and /me/people. The Office client shares a tenant-wide
+   * aadgraph throttle bucket that 429s in busy tenants; the Teams client has
+   * User.ReadBasic.All + People.Read on a separate bucket.
+   */
+  private directoryToken(): Promise<string> {
+    return acquireFociAccessToken(this.api, CLIENT_ID_TEAMS);
+  }
+
+  private async directoryGet<T>(path: string, opts: { query?: Record<string, string>; headers?: Record<string, string> } = {}): Promise<T> {
+    const token = await this.directoryToken();
+    const url = `${GRAPH_BASE_URL}${path}${opts.query ? '?' + new URLSearchParams(opts.query).toString() : ''}`;
+    const resp = await this.fetch(url, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(opts.headers ?? {}) },
+    });
+    if (!resp.ok) {
+      let body: unknown;
+      try { body = await resp.json(); } catch { body = undefined; }
+      const msg = (body as { error?: { code?: string; message?: string } } | undefined)?.error;
+      throw new GraphApiError(`GET ${path} → ${resp.status} ${msg?.code ?? ''} ${msg?.message ?? resp.statusText}`.trim(), resp.status, body);
+    }
+    return (await resp.json()) as T;
+  }
+
   // ── Identity ──
 
   async getMe(): Promise<GraphUser> {
@@ -98,9 +122,8 @@ export class GraphClient {
   async findUsers(query: string, top = 10): Promise<GraphUser[]> {
     const q = query.trim();
     if (!q) return [];
-    // $search covers displayName tokens regardless of "Last, First" ordering.
     const escaped = q.replace(/"/g, '\\"');
-    const r = await this.request<GraphList<GraphUser>>('GET', '/users', {
+    const r = await this.directoryGet<GraphList<GraphUser>>('/users', {
       headers: { ConsistencyLevel: 'eventual' },
       query: {
         $search: `"displayName:${escaped}" OR "mail:${escaped}" OR "userPrincipalName:${escaped}"`,
@@ -112,18 +135,36 @@ export class GraphClient {
     return r.value;
   }
 
+  /** Relevance-ranked people search (/me/people) — orders by the signed-in user's interaction history. */
+  async searchPeople(query: string, top = 10): Promise<GraphUser[]> {
+    const q = query.trim();
+    if (!q) return [];
+    const r = await this.directoryGet<
+      GraphList<{ id: string; displayName?: string; userPrincipalName?: string; scoredEmailAddresses?: Array<{ address?: string }> }>
+    >('/me/people', {
+      query: {
+        $search: `"${q.replace(/"/g, '\\"')}"`,
+        $select: 'id,displayName,userPrincipalName,scoredEmailAddresses',
+        $top: String(top),
+      },
+    });
+    return r.value.map((p) => ({
+      id: p.id,
+      displayName: p.displayName ?? null,
+      userPrincipalName: p.userPrincipalName ?? null,
+      mail: p.scoredEmailAddresses?.[0]?.address ?? null,
+    }));
+  }
+
   /** Returns a data:image/* URL for the user's 48×48 profile photo, or null when the user has none. Throws on transient errors so callers can retry later. */
   async getUserPhoto(userId: string, retried = false): Promise<string | null> {
-    const token = await ensureAccessToken(this.api, { allowInteractive: false });
+    const token = await this.directoryToken();
     const path = userId === tokenCache.getObjectId() ? '/me' : `/users/${encodeURIComponent(userId)}`;
     const resp = await this.fetch(`${GRAPH_BASE_URL}${path}/photos/48x48/$value`, {
       headers: { Authorization: `Bearer ${token}` },
     });
+    void retried;
     if (resp.status === 404) return null;
-    if (resp.status === 401 && !retried) {
-      await forceRefresh(this.api);
-      return this.getUserPhoto(userId, true);
-    }
     if (!resp.ok) {
       throw new GraphApiError(`GET ${path}/photos → ${resp.status}`, resp.status);
     }
@@ -134,7 +175,7 @@ export class GraphClient {
 
   async getUserByEmail(email: string): Promise<GraphUser | null> {
     try {
-      return await this.request<GraphUser>('GET', `/users/${encodeURIComponent(email)}`, {
+      return await this.directoryGet<GraphUser>(`/users/${encodeURIComponent(email)}`, {
         query: { $select: 'id,displayName,userPrincipalName,mail' },
       });
     } catch (err) {
