@@ -152,11 +152,15 @@ export function AdaptiveCard({
     const p = pendingSearchRef.current;
     if (!p || !choiceSearch || choiceSearch.reqId !== p.reqId) return;
     if (choiceSearch.loading) return;
-    if (choiceSearch.error) {
-      p.input.showErrorIndicator(choiceSearch.query, choiceSearch.error);
-    } else {
-      p.input.renderChoices(choiceSearch.query, choiceSearch.results);
+    // Some bots (e.g. GitHub) support free-text values that their search handler
+    // rejects (org typeahead but expects "org/repo" on submit). Always offer the
+    // raw query as a selectable choice so isValid() passes and submit isn't blocked.
+    const q = choiceSearch.query.trim();
+    const results = choiceSearch.error ? [] : [...choiceSearch.results];
+    if (q && !results.some((r) => r.value === q || r.title === q)) {
+      results.push({ title: q, value: q });
     }
+    p.input.renderChoices(choiceSearch.query, results);
     p.input.removeLoadingIndicator();
     pendingSearchRef.current = null;
   }, [choiceSearch]);
