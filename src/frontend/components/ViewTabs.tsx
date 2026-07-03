@@ -4,24 +4,16 @@ export function ViewRail({
   active,
   chatUnread,
   mailUnread,
+  onAction,
 }: {
   active: 'teams' | 'mail';
   chatUnread: number;
   mailUnread: number;
+  onAction: (action: string, data?: unknown) => void;
 }) {
   const go = (view: 'teams' | 'mail') => {
     if (view === active) return;
-    // Renderer-side navigation (App.tsx listens for this custom event) — avoids
-    // a backend round-trip and works regardless of which panel's action handler
-    // the click would otherwise route through.
-    window.dispatchEvent(
-      new CustomEvent('plugin-navigate', {
-        detail: {
-          pluginName: 'msgraph',
-          target: { type: 'panel', panelId: view === 'mail' ? 'outlook-panel' : 'teams-panel' },
-        },
-      }),
-    );
+    onAction('set-view', { view });
   };
   return (
     <div

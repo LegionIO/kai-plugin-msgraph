@@ -7,8 +7,11 @@ import type { PluginComponentProps } from './hooks.ts';
 import type { MsgraphPluginState } from '../shared/types.ts';
 
 function PanelView(props: PluginComponentProps<MsgraphPluginState>) {
-  const view = ((props.props as { view?: string } | undefined)?.view === 'mail' ? 'mail' : 'teams') as 'teams' | 'mail';
   const s = props.pluginState ?? ({} as MsgraphPluginState);
+  // state.activeView is the source of truth (defaults to 'teams'); Kai's own
+  // panel selection (props.view) is ignored so alphabetical panel-sort in the
+  // host can't land us on Outlook when the user last picked Teams.
+  const view: 'teams' | 'mail' = s.activeView ?? 'teams';
   const authed = !!s.auth?.isAuthenticated;
   const chatUnread = (s.chats ?? []).reduce((n, c) => n + (c.unread ? 1 : 0), 0);
   const mailUnread = (s.mailFolders ?? []).find((f) => f.wellKnownName === 'inbox')?.unreadItemCount ?? 0;
@@ -17,7 +20,7 @@ function PanelView(props: PluginComponentProps<MsgraphPluginState>) {
   return React.createElement(
     'div',
     { style: { display: 'flex', height: '100%', minHeight: 0 } },
-    React.createElement(ViewRail, { active: view, chatUnread, mailUnread }),
+    React.createElement(ViewRail, { active: view, chatUnread, mailUnread, onAction: props.onAction }),
     React.createElement('div', { style: { flex: 1, minWidth: 0, minHeight: 0 } }, child),
   );
 }

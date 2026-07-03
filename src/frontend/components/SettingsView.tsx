@@ -38,6 +38,97 @@ const TOOL_LABELS: Record<keyof ToolPermissions, string> = {
   createGroupChat: 'create-group-chat — new group + optional first message',
 };
 
+function SignatureEditor({ value, onChange }: { value: string; onChange: (html: string) => void }) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  const [showRaw, setShowRaw] = React.useState(false);
+  const [raw, setRaw] = React.useState(value);
+  React.useEffect(() => { setRaw(value); if (ref.current && !showRaw) ref.current.innerHTML = value; }, [value]);
+  React.useEffect(() => { if (ref.current && !showRaw) ref.current.innerHTML = raw; }, [showRaw]);
+
+  const inlineImages = async (root: HTMLElement) => {
+    const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
+    await Promise.all(
+      imgs.map(async (img) => {
+        const src = img.getAttribute('src') ?? '';
+        if (!/^https?:/i.test(src)) return;
+        try {
+          const r = await fetch(src);
+          if (!r.ok) return;
+          const b = await r.blob();
+          const dataUrl: string = await new Promise((res, rej) => {
+            const fr = new FileReader();
+            fr.onload = () => res(String(fr.result));
+            fr.onerror = () => rej(fr.error);
+            fr.readAsDataURL(b);
+          });
+          img.setAttribute('src', dataUrl);
+        } catch { /* leave remote src */ }
+      }),
+    );
+  };
+
+  const commit = async () => {
+    const el = ref.current;
+    if (!el) return;
+    await inlineImages(el);
+    const html = el.innerHTML.trim();
+    setRaw(html);
+    onChange(html);
+  };
+
+  return (
+    <div className="rounded-lg border border-border overflow-hidden">
+      <div className="flex items-center justify-between px-2 py-1 border-b border-border bg-muted/30">
+        <span className="text-[10px] text-muted-foreground">
+          {showRaw ? 'Raw HTML' : 'Paste your signature here — formatting & images are kept'}
+        </span>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => setShowRaw((v) => !v)}
+            className="px-1.5 py-0.5 text-[10px] rounded border border-border hover:bg-muted"
+          >
+            {showRaw ? 'Preview' : 'HTML'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setRaw(''); onChange(''); if (ref.current) ref.current.innerHTML = ''; }}
+            className="px-1.5 py-0.5 text-[10px] rounded border border-border hover:bg-muted"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      {showRaw ? (
+        <textarea
+          value={raw}
+          onChange={(e) => setRaw(e.target.value)}
+          onBlur={() => onChange(raw)}
+          rows={6}
+          style={{ fontFamily: 'ui-monospace,monospace', resize: 'vertical' }}
+          className="w-full bg-background px-2 py-1.5 text-[11px] border-0 focus:outline-none"
+        />
+      ) : (
+        <div
+          ref={ref}
+          contentEditable
+          suppressContentEditableWarning
+          onBlur={() => void commit()}
+          onPaste={(e) => {
+            const html = e.clipboardData.getData('text/html');
+            const text = e.clipboardData.getData('text/plain');
+            if (!html && !text) return;
+            e.preventDefault();
+            document.execCommand('insertHTML', false, html || text.replace(/\n/g, '<br>'));
+          }}
+          style={{ minHeight: 90, maxHeight: 260, overflowY: 'auto', background: '#fff', color: '#1f2937', colorScheme: 'light' }}
+          className="px-3 py-2 text-[12px] focus:outline-none"
+        />
+      )}
+    </div>
+  );
+}
+
 export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
   const s = pluginState ?? ({} as MsgraphPluginState);
   const cfg = pluginConfig ?? {};
@@ -190,6 +281,40 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
           />
           <span>Debug logging</span>
         </label>
+      </Section>
+
+      <Section title="Mail signature">
+        <p className="text-[11px] text-muted-foreground mb-2">
+          {s.mailSignature?.source === 'owa'
+            ? 'Loaded from your Outlook settings. You can override it below.'
+            : s.mailSignature?.source === 'config'
+              ? 'Using the signature below.'
+              : 'No signature found in your Outlook settings. Paste yours into the box below (rich formatting from Outlook/Word is preserved).'}
+        </p>
+        <SignatureEditor
+          value={prefs.mailSignatureHtml ?? s.mailSignature?.html ?? ''}
+          onChange={(html) => onAction('set-preference', { key: 'mailSignatureHtml', value: html })}
+        />
+        <div className="flex gap-4 mt-2">
+          <label className="flex items-center gap-1.5 text-[11px]">
+            <input
+              type="checkbox"
+              checked={prefs.mailSignatureAutoNew ?? true}
+              onChange={(e) => onAction('set-preference', { key: 'mailSignatureAutoNew', value: e.target.checked })}
+              className="accent-primary"
+            />
+            Add to new messages
+          </label>
+          <label className="flex items-center gap-1.5 text-[11px]">
+            <input
+              type="checkbox"
+              checked={prefs.mailSignatureAutoReply ?? true}
+              onChange={(e) => onAction('set-preference', { key: 'mailSignatureAutoReply', value: e.target.checked })}
+              className="accent-primary"
+            />
+            Add to replies/forwards
+          </label>
+        </div>
       </Section>
     </div>
   );

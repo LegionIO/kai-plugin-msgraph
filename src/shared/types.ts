@@ -237,6 +237,14 @@ export interface OutgoingMail {
   }>;
 }
 
+export interface MailSignature {
+  html: string;
+  autoAddOnNew: boolean;
+  autoAddOnReply: boolean;
+  /** 'owa' = fetched from Outlook web settings; 'config' = user-entered override in plugin settings. */
+  source: 'owa' | 'config';
+}
+
 export interface MailComposeState {
   mode: 'new' | 'reply' | 'replyAll' | 'forward';
   /** Source message when replying/forwarding. */
@@ -246,6 +254,8 @@ export interface MailComposeState {
   subject: string;
   /** Quoted original (HTML) appended below the user's body when replying/forwarding. */
   quotedHtml: string | null;
+  /** Signature HTML appended between the user's body and the quoted original. */
+  signatureHtml: string | null;
 }
 
 export interface Presence {
@@ -303,6 +313,8 @@ export interface TaskModuleState {
 
 // ── Plugin State ──
 export interface MsgraphPluginState {
+  /** Which sub-view the panel router shows. Source of truth over Kai's panel selection. */
+  activeView: 'teams' | 'mail';
   auth: AuthStatus;
   mfa: MfaState;
   credentials: CredentialStatus;
@@ -370,6 +382,7 @@ export interface MsgraphPluginState {
   /** attachmentId → data-URL (inline images). */
   mailInlineAttachments: Record<string, string | null>;
   composingMail: MailComposeState | null;
+  mailSignature: MailSignature | null;
   loadingMailFolders: boolean;
   loadingMailList: boolean;
   loadingMail: boolean;
@@ -386,6 +399,10 @@ export interface UserPreferences {
   notifications: boolean;
   pollIntervalSeconds: number;
   debugLogging: boolean;
+  /** Manual signature override (HTML). Used when Outlook's roaming signatures aren't fetchable. */
+  mailSignatureHtml?: string;
+  mailSignatureAutoNew?: boolean;
+  mailSignatureAutoReply?: boolean;
 }
 
 export interface ToolPermissions {

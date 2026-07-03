@@ -19,6 +19,7 @@ export function MailComposeDialog({
   const [showCc, setShowCc] = useState(compose.cc.length > 0);
   const [subject, setSubject] = useState(compose.subject);
   const [files, setFiles] = useState<File[]>([]);
+  const [includeSig, setIncludeSig] = useState(!!compose.signatureHtml);
   const fileRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<MailEditorHandle>(null);
 
@@ -36,6 +37,7 @@ export function MailComposeDialog({
       ),
     ]);
     let bodyHtml = serialized.html;
+    if (includeSig && compose.signatureHtml) bodyHtml += compose.signatureHtml;
     if (compose.quotedHtml) bodyHtml += `<br>${compose.quotedHtml}`;
     const attachments = [
       ...serialized.inlineImages.map((img) => ({
@@ -135,6 +137,12 @@ export function MailComposeDialog({
                 </span>
               ))}
             </div>
+          )}
+          {compose.signatureHtml && (
+            <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer">
+              <input type="checkbox" checked={includeSig} onChange={(e) => setIncludeSig(e.target.checked)} className="w-3 h-3" />
+              Append signature
+            </label>
           )}
           {compose.quotedHtml && (
             <details className="text-[11px] text-muted-foreground">

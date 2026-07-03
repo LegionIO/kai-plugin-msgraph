@@ -209,34 +209,36 @@ export function PanelView({ pluginState, onAction }: Props) {
     });
   };
 
-  // Auto-scroll: pin to bottom after layout when new messages arrive, chat/height changes,
-  // or hosted images finish loading — unless the user has scrolled up.
-  useLayoutEffect(
-    scrollToBottomIfSticky,
-    [messages.length, s.activeChatId, panelHeight, Object.keys(hostedContents).length],
-  );
-
   const olderNextLink = s.activeChatMessagesNextLink;
   const loadingOlder = !!s.loadingOlderMessages;
   const olderNextLinkRef = useRef(olderNextLink);
   const loadingOlderRef = useRef(loadingOlder);
+  /** Distance from bottom (scrollHeight - scrollTop) captured before a prepend. */
+  const olderAnchorRef = useRef<number | null>(null);
   useEffect(() => { olderNextLinkRef.current = olderNextLink; loadingOlderRef.current = loadingOlder; },
     [olderNextLink, loadingOlder]);
+
+  // Auto-scroll: after layout, either restore the pre-prepend anchor (load-older)
+  // or pin to bottom (new messages) — never both.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (olderAnchorRef.current !== null) {
+      el.scrollTop = el.scrollHeight - olderAnchorRef.current;
+      if (!loadingOlder) olderAnchorRef.current = null;
+      return;
+    }
+    scrollToBottomIfSticky();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length, s.activeChatId, panelHeight, loadingOlder, Object.keys(hostedContents).length]);
 
   const loadOlder = () => {
     if (!olderNextLinkRef.current || loadingOlderRef.current) return;
     loadingOlderRef.current = true;
     const el = scrollRef.current;
-    const anchor = el ? el.scrollHeight - el.scrollTop : 0;
+    olderAnchorRef.current = el ? el.scrollHeight - el.scrollTop : 0;
     stickToBottomRef.current = false;
     onAction('load-older-messages');
-    const restore = () => {
-      if (!el) return;
-      el.scrollTop = el.scrollHeight - anchor;
-    };
-    requestAnimationFrame(restore);
-    setTimeout(restore, 60);
-    setTimeout(restore, 250);
   };
 
   const onThreadScroll = () => {

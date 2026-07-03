@@ -13,6 +13,7 @@ token_cache.json
 /foci_scan.py
 /probe_*.py
 /teams-curls.txt
+/outlook-curls.txt
 /taskfetch_response.json
 /task_submit_response.json
 /execute_cards.json

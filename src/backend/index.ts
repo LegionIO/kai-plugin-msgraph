@@ -17,6 +17,7 @@ import {
   initMail,
   loadMailFolders,
   loadMailList,
+  loadSignature,
   startMailPoll,
   stopMailPoll,
   disposeMail,
@@ -93,6 +94,9 @@ function getPreferences(api: PluginAPI): UserPreferences {
     notifications: prefs.notifications ?? true,
     pollIntervalSeconds: prefs.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS,
     debugLogging: prefs.debugLogging ?? false,
+    mailSignatureHtml: prefs.mailSignatureHtml,
+    mailSignatureAutoNew: prefs.mailSignatureAutoNew,
+    mailSignatureAutoReply: prefs.mailSignatureAutoReply,
   };
 }
 
@@ -106,6 +110,7 @@ function getToolPermissions(api: PluginAPI): ToolPermissions {
 
 function initialState(): MsgraphPluginState {
   return {
+    activeView: 'teams',
     auth: {
       isAuthenticated: false,
       email: null,
@@ -174,7 +179,7 @@ function updateNavBadge(api: PluginAPI): void {
     visible: true,
     priority: 0,
     badge: unread > 0 ? unread : undefined,
-    target: { type: 'panel', panelId: PANEL_ID },
+    target: { type: 'action', targetId: `panel:${PANEL_ID}`, action: 'set-view', data: { view: 'teams' }, panelId: PANEL_ID },
   });
 }
 
@@ -607,6 +612,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         startMailPoll(api);
         await loadChats(api, true);
         void loadMailFolders(api).then(() => loadMailList(api, 'inbox'));
+        void loadSignature(api);
         void refreshMeProfile(api);
         break;
       }
@@ -1251,9 +1257,9 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         void sendTyping(api, chatId).catch((e) => log.warn(`sendTyping: ${e}`));
         break;
       }
-      case 'navigate-panel': {
+      case 'set-view': {
         const { view } = data as { view: 'teams' | 'mail' };
-        api.navigation.open({ type: 'panel', panelId: view === 'mail' ? MAIL_PANEL_ID : PANEL_ID });
+        api.state.set('activeView', view);
         break;
       }
       case 'open-in-teams': {
@@ -1330,6 +1336,9 @@ async function handleSettingsAction(api: PluginAPI, action: string, data?: unkno
         const { key, value } = data as { key: keyof UserPreferences; value: unknown };
         const current = getPreferences(api);
         api.config.setPluginData('preferences', { ...current, [key]: value });
+        if (key === 'mailSignatureHtml' || key === 'mailSignatureAutoNew' || key === 'mailSignatureAutoReply') {
+          void loadSignature(api);
+        }
         break;
       }
       default:
@@ -1408,7 +1417,7 @@ export async function activate(api: PluginAPI): Promise<void> {
     icon: { lucide: 'message-square-more' },
     visible: true,
     priority: 0,
-    target: { type: 'panel', panelId: PANEL_ID },
+    target: { type: 'action', targetId: `panel:${PANEL_ID}`, action: 'set-view', data: { view: 'teams' }, panelId: PANEL_ID },
   });
   api.ui.registerNavigationItem({
     id: MAIL_NAV_ID,
@@ -1416,18 +1425,25 @@ export async function activate(api: PluginAPI): Promise<void> {
     icon: { lucide: 'mail' },
     visible: true,
     priority: 1,
-    target: { type: 'panel', panelId: MAIL_PANEL_ID },
+    target: { type: 'action', targetId: `panel:${PANEL_ID}`, action: 'set-view', data: { view: 'mail' }, panelId: PANEL_ID },
   });
   api.ui.registerSettingsView({
     id: SETTINGS_ID,
     label: 'Teams & Outlook',
   });
 
-  api.onAction(`panel:${PANEL_ID}`, (action, data) => handlePanelAction(api, action, data));
-  const SHARED_ACTIONS = new Set(['login', 'logout', 'open-external', 'search-people', 'navigate-panel']);
-  api.onAction(`panel:${MAIL_PANEL_ID}`, (action, data) =>
-    SHARED_ACTIONS.has(action) ? handlePanelAction(api, action, data) : handleMailAction(api, action, data),
-  );
+  // Both panels route through one dispatcher so the view can render in either
+  // panel host regardless of which one Kai decided to mount.
+  const MAIL_ACTIONS = new Set([
+    'refresh-mail', 'select-folder', 'toggle-folder', 'load-more-mail', 'select-mail',
+    'mark-mail', 'archive-mail', 'delete-mail', 'move-mail', 'search-mail', 'clear-mail-search',
+    'compose-mail', 'close-compose', 'send-mail', 'download-attachment', 'open-in-outlook',
+    'mark-folder-read', 'empty-folder', 'create-folder', 'rename-folder', 'delete-folder',
+  ]);
+  const dispatch = (action: string, data?: unknown) =>
+    MAIL_ACTIONS.has(action) ? handleMailAction(api, action, data) : handlePanelAction(api, action, data);
+  api.onAction(`panel:${PANEL_ID}`, dispatch);
+  api.onAction(`panel:${MAIL_PANEL_ID}`, dispatch);
   api.onAction('settings:SettingsView', (action, data) => handleSettingsAction(api, action, data));
 
   try {
@@ -1567,6 +1583,7 @@ export async function activate(api: PluginAPI): Promise<void> {
         startMailPoll(api);
         await loadChats(api);
         void loadMailFolders(api).then(() => loadMailList(api, 'inbox'));
+        void loadSignature(api);
         await refreshMeProfile(api);
       } catch (err) {
         log.warn(`Startup silent refresh failed: ${err}`);

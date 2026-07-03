@@ -1,18 +1,24 @@
 import { GraphClient } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
 import * as photoCache from './photo-cache.js';
+import { acquireFociAccessToken } from './auth.js';
 import { DiskCache } from './disk-cache.js';
 import * as mediaServer from './media-server.js';
 import { getLogger } from './logger-singleton.js';
-import { MAIL_NAV_ID, MAIL_PANEL_ID, MAIL_DELTA_POLL_SECONDS, WELL_KNOWN_FOLDERS } from '../shared/constants.js';
+import {
+  MAIL_NAV_ID, MAIL_PANEL_ID, MAIL_DELTA_POLL_SECONDS, WELL_KNOWN_FOLDERS,
+  CLIENT_ID_OFFICE, OUTLOOK_SCOPE, OUTLOOK_CLOUD_SETTINGS_URL, OUTLOOK_ROAMING_SIG_URL,
+} from '../shared/constants.js';
 import type {
   PluginAPI,
   MsgraphPluginState,
   NormalizedMailSummary,
   NormalizedMail,
   MailComposeState,
+  MailSignature,
   OutgoingMail,
   MailAddress,
+  UserPreferences,
 } from '../shared/types.js';
 
 type EnsureFn = (allowInteractive?: boolean) => Promise<GraphClient>;
@@ -35,7 +41,7 @@ const st = (api: PluginAPI) => api.state.get() as Partial<MsgraphPluginState>;
 export function mailInitialState(): Pick<
   MsgraphPluginState,
   | 'mailFolders' | 'mailFoldersExpanded' | 'mailSenderIds' | 'activeMailFolder' | 'mailList' | 'mailListNextLink' | 'mailSearch'
-  | 'activeMailId' | 'activeMail' | 'mailInlineAttachments' | 'composingMail'
+  | 'activeMailId' | 'activeMail' | 'mailInlineAttachments' | 'composingMail' | 'mailSignature'
   | 'loadingMailFolders' | 'loadingMailList' | 'loadingMail' | 'sendingMail' | 'mailError'
 > {
   return {
@@ -50,6 +56,7 @@ export function mailInitialState(): Pick<
     activeMail: null,
     mailInlineAttachments: {},
     composingMail: null,
+    mailSignature: null,
     loadingMailFolders: false,
     loadingMailList: false,
     loadingMail: false,
@@ -129,7 +136,7 @@ export function updateMailNavBadge(api: PluginAPI): void {
     visible: true,
     priority: 1,
     badge: inbox && inbox.unreadItemCount > 0 ? inbox.unreadItemCount : undefined,
-    target: { type: 'panel', panelId: MAIL_PANEL_ID },
+    target: { type: 'action', targetId: `panel:${MAIL_PANEL_ID}`, action: 'set-view', data: { view: 'mail' }, panelId: MAIL_PANEL_ID },
   });
 }
 
@@ -369,6 +376,83 @@ async function runDelta(api: PluginAPI): Promise<void> {
   }
 }
 
+// ── Signature ──
+
+function prefs(api: PluginAPI): Partial<UserPreferences> {
+  return ((api.config.getPluginData().preferences ?? {}) as Partial<UserPreferences>);
+}
+
+function decodeJwt(t: string): Record<string, unknown> {
+  try { return JSON.parse(Buffer.from(t.split('.')[1], 'base64url').toString('utf-8')); }
+  catch { return {}; }
+}
+
+async function outlookHeaders(api: PluginAPI): Promise<Record<string, string>> {
+  const tok = await acquireFociAccessToken(api, CLIENT_ID_OFFICE, OUTLOOK_SCOPE);
+  const c = decodeJwt(tok);
+  const anchor = c.puid && c.tid ? `PUID:${c.puid}@${c.tid}` : `SMTP:${tokenCache.getEmail() ?? ''}`;
+  return {
+    Authorization: `Bearer ${tok}`,
+    'x-anchormailbox': anchor,
+    'x-routingparameter-sessionkey': anchor,
+    'x-outlook-client': 'owa',
+  };
+}
+
+export async function loadSignature(api: PluginAPI): Promise<void> {
+  const p = prefs(api);
+  if (p.mailSignatureHtml?.trim()) {
+    api.state.set('mailSignature', {
+      html: p.mailSignatureHtml,
+      autoAddOnNew: p.mailSignatureAutoNew ?? true,
+      autoAddOnReply: p.mailSignatureAutoReply ?? true,
+      source: 'config',
+    } satisfies MailSignature);
+    return;
+  }
+  try {
+    const H = await outlookHeaders(api);
+    const resp = await api.fetch(
+      `${OUTLOOK_CLOUD_SETTINGS_URL}?settingname=signaturehtml,roaming_signature_list,roaming_new_signature,roaming_reply_signature`,
+      { headers: H },
+    );
+    if (!resp.ok) throw new Error(`OutlookCloudSettings ${resp.status}`);
+    const raw = (await resp.json()) as unknown;
+    const list: Array<{ name?: string; value?: unknown }> =
+      Array.isArray(raw) ? raw : ((raw as { settings?: unknown[] }).settings as never) ?? [];
+    const get = (n: string) => list.find((s) => s.name?.toLowerCase() === n)?.value as string | undefined;
+
+    let html = get('signaturehtml');
+    const newName = get('roaming_new_signature');
+    const replyName = get('roaming_reply_signature');
+    const usesRoaming = !!get('roaming_signature_list');
+
+    if (!html && newName) {
+      const r2 = await api.fetch(
+        `${OUTLOOK_ROAMING_SIG_URL}/GetSignature?signatureName=${encodeURIComponent(newName)}&api-version=1.0`,
+        { headers: H },
+      );
+      if (r2.ok) {
+        const j = (await r2.json()) as { html?: string; Html?: string; signatureHtml?: string };
+        html = j.html ?? j.Html ?? j.signatureHtml;
+      }
+    }
+    if (html?.trim()) {
+      api.state.set('mailSignature', {
+        html,
+        autoAddOnNew: true,
+        autoAddOnReply: usesRoaming ? !!replyName : true,
+        source: 'owa',
+      } satisfies MailSignature);
+      getLogger().info(`mail-signature: loaded from Outlook (${usesRoaming ? 'roaming' : 'legacy'})`);
+    } else {
+      getLogger().info('mail-signature: no signature configured in Outlook; use plugin Settings to set one.');
+    }
+  } catch (err) {
+    getLogger().warn(`mail-signature fetch failed: ${err}`);
+  }
+}
+
 // ── Compose helpers ──
 
 function quoteHeader(m: NormalizedMail): string {
@@ -384,9 +468,17 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function makeCompose(mode: MailComposeState['mode'], src: NormalizedMail | null, me: MailAddress): MailComposeState {
+function makeCompose(
+  mode: MailComposeState['mode'],
+  src: NormalizedMail | null,
+  me: MailAddress,
+  sig: MailSignature | null,
+): MailComposeState {
+  const isReplyish = mode === 'reply' || mode === 'replyAll' || mode === 'forward';
+  const wantSig = sig && (isReplyish ? sig.autoAddOnReply : sig.autoAddOnNew);
+  const signatureHtml = wantSig ? `<br><br>${sig.html}` : null;
   if (!src || mode === 'new') {
-    return { mode: 'new', sourceId: null, to: [], cc: [], subject: '', quotedHtml: null };
+    return { mode: 'new', sourceId: null, to: [], cc: [], subject: '', quotedHtml: null, signatureHtml };
   }
   const isMe = (a: MailAddress) => a.address.toLowerCase() === me.address.toLowerCase();
   const subj = src.subject.replace(/^(re|fw|fwd):\s*/i, '');
@@ -395,6 +487,7 @@ function makeCompose(mode: MailComposeState['mode'], src: NormalizedMail | null,
       mode, sourceId: src.id, to: [], cc: [],
       subject: `FW: ${subj}`,
       quotedHtml: quoteHeader(src) + src.bodyHtml,
+      signatureHtml,
     };
   }
   const to = mode === 'replyAll'
@@ -406,6 +499,7 @@ function makeCompose(mode: MailComposeState['mode'], src: NormalizedMail | null,
     to: dedupeAddrs(to), cc: dedupeAddrs(cc),
     subject: `RE: ${subj}`,
     quotedHtml: quoteHeader(src) + src.bodyHtml,
+    signatureHtml,
   };
 }
 
@@ -613,7 +707,7 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
       case 'compose-mail': {
         const { mode } = data as { mode: MailComposeState['mode'] };
         const me: MailAddress = { name: tokenCache.getDisplayName(), address: tokenCache.getEmail() ?? '' };
-        api.state.set('composingMail', makeCompose(mode, st(api).activeMail ?? null, me));
+        api.state.set('composingMail', makeCompose(mode, st(api).activeMail ?? null, me, st(api).mailSignature ?? null));
         break;
       }
       case 'close-compose': {
