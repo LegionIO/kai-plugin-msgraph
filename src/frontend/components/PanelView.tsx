@@ -549,12 +549,14 @@ function Segments({
   segments,
   fromMe,
   onMentionClick,
+  onOpenLink,
   hostedContents,
   onContentResize,
 }: {
   segments: BodySegment[];
   fromMe: boolean;
   onMentionClick: (userId: string) => void;
+  onOpenLink: (url: string) => void;
   hostedContents: Record<string, string | null>;
   onContentResize?: () => void;
 }) {
@@ -634,7 +636,7 @@ function Segments({
               href={seg.href}
               onClick={(e) => {
                 e.preventDefault();
-                if (seg.href) window.open?.(seg.href, '_blank');
+                if (seg.href) onOpenLink(seg.href);
               }}
               title={seg.href}
               style={{ color: fromMe ? undefined : '#2563eb', textDecoration: 'underline', cursor: 'pointer' }}
@@ -651,7 +653,7 @@ function Segments({
           const size = seg.level === 1 ? '1.15em' : seg.level === 2 ? '1.05em' : '1em';
           return (
             <div key={i} style={{ fontSize: size, fontWeight: 600, margin: '6px 0 2px' }}>
-              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} hostedContents={hostedContents} onContentResize={onContentResize} />
+              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} onOpenLink={onOpenLink} hostedContents={hostedContents} onContentResize={onContentResize} />
             </div>
           );
         }
@@ -661,7 +663,7 @@ function Segments({
               key={i}
               className={`my-1 pl-2.5 border-l-2 ${fromMe ? 'border-primary-foreground/40' : 'border-border'} opacity-90`}
             >
-              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} hostedContents={hostedContents} onContentResize={onContentResize} />
+              <Segments segments={seg.segments} fromMe={fromMe} onMentionClick={onMentionClick} onOpenLink={onOpenLink} hostedContents={hostedContents} onContentResize={onContentResize} />
             </div>
           );
         }
@@ -985,6 +987,7 @@ function MessageBubble({
               segments={m.segments}
               fromMe={m.fromMe}
               onMentionClick={onMentionClick}
+              onOpenLink={(url) => onAction('open-external', { url })}
               hostedContents={hostedContents}
               onContentResize={onContentResize}
             />
@@ -998,7 +1001,7 @@ function MessageBubble({
                   ? `https://teams.microsoft.com/l/message/${m.chatId}/${m.id}?context=${encodeURIComponent('{"contextType":"chat"}')}`
                   : null
               }
-              onOpenUrl={(url) => window.open?.(url, '_blank')}
+              onOpenUrl={(url) => onAction('open-external', { url })}
               onOpenInTeams={(url) => onOpenInTeams(url)}
               onInvoke={onCardInvoke}
               pending={cardPending}
@@ -1012,7 +1015,7 @@ function MessageBubble({
                   href={f.url ?? undefined}
                   onClick={(e) => {
                     e.preventDefault();
-                    if (f.url) window.open?.(f.url, '_blank');
+                    if (f.url) onAction('open-external', { url: f.url });
                   }}
                   title={f.url ?? undefined}
                   className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${

@@ -2,10 +2,44 @@ import type { PluginAPI, GraphUser, GraphChatType } from '../shared/types.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
 import { buildMessageBody, withMessageRef, type PendingImage } from '../shared/markdown.js';
-import { setForcedAvailability, setStatusNote, getMyPresence, type UpsAvailability } from './ic3-client.js';
+import {
+  setForcedAvailability,
+  setStatusNote,
+  getMyPresence,
+  invokeMessageback,
+  invokeTask,
+  invokeExecute,
+  type UpsAvailability,
+} from './ic3-client.js';
 import { getLogger } from './logger-singleton.js';
 
 const AVAIL_VALUES = ['Available', 'Busy', 'DoNotDisturb', 'BeRightBack', 'Away', 'Offline'] as const;
+
+interface CardAction {
+  id: string | null;
+  title: string | null;
+  type: string;
+  data?: Record<string, unknown>;
+  verb?: string;
+  url?: string;
+}
+
+function walkActions(node: unknown, out: CardAction[]): void {
+  if (Array.isArray(node)) { for (const c of node) walkActions(c, out); return; }
+  if (!node || typeof node !== 'object') return;
+  const n = node as Record<string, unknown>;
+  if (typeof n.type === 'string' && n.type.startsWith('Action.')) {
+    out.push({
+      id: typeof n.id === 'string' ? n.id : null,
+      title: typeof n.title === 'string' ? n.title : null,
+      type: n.type,
+      data: (n.data && typeof n.data === 'object') ? (n.data as Record<string, unknown>) : undefined,
+      verb: typeof n.verb === 'string' ? n.verb : undefined,
+      url: typeof n.url === 'string' ? n.url : undefined,
+    });
+  }
+  for (const v of Object.values(n)) walkActions(v, out);
+}
 
 export type ToolDefinition = {
   name: string;
@@ -551,6 +585,93 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
     },
 
     {
+      name: 'invoke-card-action',
+      description:
+        'Click a button on an Adaptive Card message sent by a bot. Omit `action` to list available actions on the card. ' +
+        'Plain submit buttons cause the bot to post a reply into the chat; task-module buttons return the dialog card content. ' +
+        'Only works on messages where the sender is a bot/app.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chatId: { type: 'string', description: 'The chat containing the card message.' },
+          messageId: { type: 'string', description: 'The message id (arrival timestamp).' },
+          action: {
+            type: 'string',
+            description: 'Button title or id to click. Omit to list all actions on the card.',
+          },
+          inputs: {
+            type: 'object',
+            additionalProperties: true,
+            description: 'Optional Input.* values to include with the submit (form fields).',
+          },
+        },
+        required: ['chatId', 'messageId'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { chatId, messageId, action, inputs } = input as {
+            chatId: string; messageId: string; action?: string; inputs?: Record<string, unknown>;
+          };
+          const msg = await client.getMessage(chatId, messageId);
+          const botId = msg.from?.application?.id;
+          const actions: CardAction[] = [];
+          for (const att of msg.attachments ?? []) {
+            if (att.contentType === 'application/vnd.microsoft.card.adaptive' && att.content) {
+              try { walkActions(JSON.parse(att.content), actions); } catch { /* skip */ }
+            }
+          }
+          const listed = actions.map((a) => ({ id: a.id, title: a.title, type: a.type, url: a.url }));
+          if (!action) {
+            return { success: true, botId: botId ?? null, actions: listed };
+          }
+          if (!botId) {
+            return { error: 'Message was not sent by a bot; card actions cannot be invoked.', actions: listed };
+          }
+          const q = action.toLowerCase();
+          const hit = actions.find(
+            (a) => a.id?.toLowerCase() === q || a.title?.toLowerCase() === q,
+          ) ?? actions.find(
+            (a) => (a.title ?? '').toLowerCase().includes(q) || (a.id ?? '').toLowerCase().includes(q),
+          );
+          if (!hit) {
+            return { error: `No action matching "${action}".`, actions: listed };
+          }
+          const ctx = { botId, chatId, messageId };
+          if (hit.type === 'Action.OpenUrl') {
+            return { success: true, action: hit.title ?? hit.id, type: hit.type, url: hit.url };
+          }
+          if (hit.type === 'Action.ToggleVisibility' || hit.type === 'Action.ShowCard') {
+            return { error: `${hit.type} is a client-side render toggle; nothing to invoke.` };
+          }
+          const data = { ...(hit.data ?? {}), ...(inputs ?? {}) };
+          const { msteams, ...rest } = data as Record<string, unknown> & { msteams?: { type?: string; value?: { type?: string } } };
+          if (hit.type === 'Action.Execute') {
+            const res = await invokeExecute(api, ctx, hit.verb ?? null, rest);
+            return { success: true, action: hit.title ?? hit.id, type: hit.type, response: res };
+          }
+          const mt = msteams?.type?.toLowerCase();
+          if (mt === 'task/fetch' || (mt === 'invoke' && msteams?.value?.type === 'task/fetch')) {
+            const r = await invokeTask(api, ctx, 'task/fetch', { ...rest, type: 'task/fetch' });
+            return {
+              success: true, action: hit.title ?? hit.id, type: 'task/fetch',
+              dialog: r ? { title: r.title, card: r.card, url: r.url } : null,
+              note: 'This opened a multi-step dialog; further submission is not supported via this tool — use the plugin UI.',
+            };
+          }
+          await invokeMessageback(api, ctx, rest);
+          return {
+            success: true, action: hit.title ?? hit.id, type: 'messageback',
+            note: 'Bot will post its reply into the chat asynchronously; call get-chat-messages to see it.',
+          };
+        } catch (err) {
+          return errResult(err);
+        }
+      },
+    },
+
+    {
       name: 'set-presence',
       description:
         "Set the signed-in user's Teams presence (forced availability). Pass reset=true to clear the override and return to automatic. This is a user-visible change others will see immediately.",
@@ -690,5 +811,6 @@ export const ALL_TOOL_NAMES = [
   'get-presence',
   'set-presence',
   'set-status-message',
+  'invoke-card-action',
   'create-group-chat',
 ];

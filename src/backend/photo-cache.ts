@@ -3,6 +3,7 @@ import { GraphApiError } from '../shared/types.js';
 import { GraphClient } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
 import { DiskCache } from './disk-cache.js';
+import * as mediaServer from './media-server.js';
 import { getLogger } from './logger-singleton.js';
 
 /** userId or appId → data URL, or null when confirmed no-photo. */
@@ -22,19 +23,28 @@ function schedulePublish(api: PluginAPI): void {
   if (publishTimer) return;
   publishTimer = setTimeout(() => {
     publishTimer = null;
-    api.state.set('photos', get());
+    api.state.set('photos', published());
   }, 120);
 }
 
 export function init(api: PluginAPI): void {
+  mediaServer.register('photo', (id) => cache.get(id) ?? undefined);
   disk = new DiskCache<string | null>(api.pluginName, 'photos', { hardTtlMs: HARD_TTL_MS, maxEntries: 2000 });
   const now = Date.now();
   for (const [k, e] of disk.entries()) {
     cache.set(k, e.v);
     if (now - e.at > SOFT_TTL_MS) staleAt.set(k, e.at);
   }
-  api.state.set('photos', get());
+  api.state.set('photos', published());
   getLogger().info(`photo-cache: hydrated ${cache.size} entries from disk (${staleAt.size} stale)`);
+}
+
+/** State-facing view: local-server URLs when available, else raw data-URLs. */
+export function published(): Record<string, string | null> {
+  if (!mediaServer.baseUrl()) return Object.fromEntries(cache);
+  const out: Record<string, string | null> = {};
+  for (const [k, v] of cache) out[k] = v === null ? null : mediaServer.urlFor('photo', k);
+  return out;
 }
 
 export function get(): Record<string, string | null> {
@@ -50,7 +60,8 @@ export function clear(): void {
 }
 
 export function flush(): void {
-  disk?.flush();
+  if (publishTimer) { clearTimeout(publishTimer); publishTimer = null; }
+  disk?.dispose();
 }
 
 /** Fetch any userIds not already cached; publishes to state.photos as results arrive. */

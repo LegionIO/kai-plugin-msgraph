@@ -26,6 +26,7 @@ const TOOL_LABELS: Record<keyof ToolPermissions, string> = {
   getPresence: 'get-presence — availability/activity/status for users',
   setPresence: 'set-presence — change your own availability (visible to others)',
   setStatusMessage: 'set-status-message — set/clear your Teams status note',
+  invokeCardAction: 'invoke-card-action — click a bot card button (posts on your behalf)',
   createGroupChat: 'create-group-chat — new group + optional first message',
 };
 

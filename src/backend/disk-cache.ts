@@ -95,6 +95,11 @@ export class DiskCache<V> {
     }, 500);
   }
 
+  dispose(): void {
+    if (this.writeTimer) { clearTimeout(this.writeTimer); this.writeTimer = null; }
+    this.flush();
+  }
+
   flush(): void {
     if (!this.dirty) return;
     this.dirty = false;

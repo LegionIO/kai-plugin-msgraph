@@ -54,7 +54,7 @@ export function TaskModuleDialog({
               choiceSearch={tm.choiceSearch ?? null}
               onSearchChoices={(req) => onAction('search-task-choices', req)}
               teamsDeepLink={`https://teams.microsoft.com/l/message/${tm.chatId}/${tm.messageId}?context=${encodeURIComponent('{"contextType":"chat"}')}`}
-              onOpenUrl={(url) => window.open?.(url, '_blank')}
+              onOpenUrl={(url) => onAction('open-external', { url })}
               onOpenInTeams={(url) => onAction('open-in-teams', { url })}
               onInvoke={(req) => {
                 if (req.kind === 'task/fetch') {
@@ -79,7 +79,7 @@ export function TaskModuleDialog({
               <div className="flex gap-2 justify-center">
                 <button
                   type="button"
-                  onClick={() => tm.url && window.open?.(tm.url, '_blank')}
+                  onClick={() => tm.url && onAction('open-external', { url: tm.url })}
                   className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90"
                 >
                   Open in browser

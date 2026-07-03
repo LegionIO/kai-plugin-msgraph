@@ -11,6 +11,7 @@ import * as credentialStore from './credential-store.js';
 import * as photoCache from './photo-cache.js';
 import * as presenceCache from './presence-cache.js';
 import * as hostedContentCache from './hosted-content-cache.js';
+import * as mediaServer from './media-server.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import {
   invokeMessageback,
@@ -22,6 +23,7 @@ import {
   setForcedAvailability,
   setStatusNote,
   sendTyping,
+  sendClearTyping,
   clearTypingThrottle,
   type UpsAvailability,
 } from './ic3-client.js';
@@ -65,6 +67,7 @@ const MAX_CHAT_PAGES = 20;
 type PeopleResults = Array<{ id: string; displayName: string; email: string | null }>;
 const peopleSearchCache = new Map<string, { at: number; results: PeopleResults }>();
 let peopleSearchDisk: DiskCache<PeopleResults> | null = null;
+let threadCache: DiskCache<MsgraphPluginState['activeChatMessages']> | null = null;
 const PEOPLE_CACHE_TTL_MS = 60 * 60_000;
 const PEOPLE_CACHE_MAX = 400;
 
@@ -190,6 +193,7 @@ function registerEnabledTools(api: PluginAPI): void {
     'get-presence': 'getPresence',
     'set-presence': 'setPresence',
     'set-status-message': 'setStatusMessage',
+    'invoke-card-action': 'invokeCardAction',
     'create-group-chat': 'createGroupChat',
   };
 
@@ -290,7 +294,10 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
   const seq = ++messageLoadSeq;
   const current = (api.state.get() as Partial<MsgraphPluginState>).activeChatId;
   api.state.set('activeChatId', chatId);
-  if (current !== chatId) api.state.set('activeChatMessages', []);
+  if (current !== chatId) {
+    const snap = threadCache?.get(chatId);
+    api.state.set('activeChatMessages', snap?.v ?? []);
+  }
   api.state.set('loadingMessages', true);
   api.state.set('error', null);
   try {
@@ -303,6 +310,7 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
       .filter((m) => !m.deleted)
       .reverse();
     api.state.set('activeChatMessages', normalized);
+    threadCache?.set(chatId, normalized);
     const userIds = new Set<string>();
     const appIds = new Set<string>();
     const hosted = new Set<string>();
@@ -346,15 +354,53 @@ function clearTyping(api: PluginAPI, chatId: string): void {
   }
 }
 
-function scheduleChatReload(api: PluginAPI, chatId: string): void {
-  const existing = chatRefreshDebounce.get(chatId);
-  if (existing) return;
-  chatRefreshDebounce.set(chatId, setTimeout(() => {
-    chatRefreshDebounce.delete(chatId);
-    if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
-      void loadMessages(api, chatId);
+/** Fetch a single message and merge it into activeChatMessages (much cheaper than a full page reload). */
+async function mergeMessage(api: PluginAPI, chatId: string, messageId: string): Promise<void> {
+  const st = () => api.state.get() as Partial<MsgraphPluginState>;
+  if (st().activeChatId !== chatId || !messageId) return;
+  try {
+    const client = await ensureAuthenticated(api, false);
+    const raw = await client.getMessage(chatId, messageId);
+    if (st().activeChatId !== chatId) return;
+    const myId = tokenCache.getObjectId();
+    const norm = normalizeMessage(raw, myId);
+    const cur = st().activeChatMessages ?? [];
+    let next: typeof cur;
+    const idx = cur.findIndex((m) => m.id === norm.id);
+    if (norm.deleted) {
+      next = idx >= 0 ? [...cur.slice(0, idx), ...cur.slice(idx + 1)] : cur;
+    } else if (idx >= 0) {
+      next = [...cur]; next[idx] = norm;
+    } else {
+      // Insert in chronological order (list is oldest→newest).
+      const nId = Number(norm.id);
+      let pos = cur.length;
+      while (pos > 0 && Number(cur[pos - 1].id) > nId) pos--;
+      next = [...cur.slice(0, pos), norm, ...cur.slice(pos)];
     }
-  }, 250));
+    api.state.set('activeChatMessages', next);
+    threadCache?.set(chatId, next);
+    if (norm.fromId) {
+      if (norm.fromApp) photoCache.ensureApps(api, client, [norm.fromId]);
+      else {
+        photoCache.ensure(api, client, [norm.fromId]);
+        trouter?.subscribePresence([norm.fromId]);
+      }
+    }
+    if (norm.hostedImages.length) hostedContentCache.ensure(api, client, norm.hostedImages);
+  } catch (err) {
+    getLogger().warn(`mergeMessage(${chatId},${messageId}) failed: ${err}; falling back to full reload`);
+    if (st().activeChatId === chatId) void loadMessages(api, chatId);
+  }
+}
+
+function scheduleMessageMerge(api: PluginAPI, chatId: string, messageId: string): void {
+  const key = `${chatId}|${messageId}`;
+  if (chatRefreshDebounce.has(key)) return;
+  chatRefreshDebounce.set(key, setTimeout(() => {
+    chatRefreshDebounce.delete(key);
+    void mergeMessage(api, chatId, messageId);
+  }, 150));
 }
 
 function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
@@ -386,6 +432,10 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
       typingTimers.set(ev.chatId, setTimeout(() => clearTyping(api, ev.chatId), TYPING_TTL_MS));
       return;
     }
+    case 'clearTyping': {
+      clearTyping(api, ev.chatId);
+      return;
+    }
     case 'readReceipt': {
       const cur = st.readReceipts ?? {};
       const forChat = { ...(cur[ev.chatId] ?? {}), [ev.userId]: ev.lastReadMessageId };
@@ -395,7 +445,7 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
     case 'message': {
       clearTyping(api, ev.chatId);
       if (st.activeChatId === ev.chatId) {
-        scheduleChatReload(api, ev.chatId);
+        scheduleMessageMerge(api, ev.chatId, ev.messageId);
       } else if (!ev.own) {
         const chats = (st.chats ?? []).map((c) =>
           c.id === ev.chatId ? { ...c, unread: true } : c,
@@ -409,7 +459,7 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
       return;
     }
     case 'messageUpdate': {
-      if (st.activeChatId === ev.chatId) scheduleChatReload(api, ev.chatId);
+      if (st.activeChatId === ev.chatId) scheduleMessageMerge(api, ev.chatId, ev.messageId);
       return;
     }
     case 'conversationUpdate':
@@ -456,6 +506,14 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
     switch (action) {
       case 'login': {
         api.state.set('error', null);
+        // A forced login may switch accounts. Rotate the session so all
+        // secondary caches (FOCI tokens, IC3 region, trouter) key off the new
+        // identity instead of leaking the previous account's tokens.
+        stopRealtime(api);
+        clearFociTokens();
+        clearIC3State();
+        clearTypingThrottle();
+        tokenCache.invalidateSession();
         await acquireTokenInteractive(api, { forceRefresh: true });
         hadValidTokenSinceLogout = true;
         publishAuthState(api);
@@ -639,6 +697,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
             api.state.set('composerReplyTo', null);
           }
           await client.sendMessageRaw(chatId, body);
+          void sendClearTyping(api, chatId).catch(() => {});
           if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
             await loadMessages(api, chatId);
           }
@@ -980,7 +1039,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
             } satisfies TaskModuleState);
           } else {
             api.state.set('taskModule', null);
-            if (r?.url) await api.shell.openExternal(r.url);
+            if (r?.url) await handlePanelAction(api, 'open-external', { url: r.url });
             if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === tm.chatId) {
               await loadMessages(api, tm.chatId);
             }
@@ -1076,6 +1135,17 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         await api.shell.openExternal(url);
         break;
       }
+      case 'open-external': {
+        const { url } = data as { url: string };
+        let ok = false;
+        try {
+          const u = new URL(url);
+          ok = u.protocol === 'https:' || u.protocol === 'http:' || u.protocol === 'mailto:';
+        } catch { /* invalid */ }
+        if (!ok) throw new Error(`Refusing to open URL with unsupported scheme: ${url}`);
+        await api.shell.openExternal(url);
+        break;
+      }
       default:
         log.warn(`Unknown panel action: ${action}`);
     }
@@ -1117,6 +1187,7 @@ async function handleSettingsAction(api: PluginAPI, action: string, data?: unkno
         presenceCache.clear();
         peopleSearchCache.clear();
         peopleSearchDisk?.clear();
+        threadCache?.clear();
         api.state.set('photos', {});
         api.state.set('presence', {});
         api.state.set('hostedContents', {});
@@ -1166,10 +1237,15 @@ export async function activate(api: PluginAPI): Promise<void> {
 
   api.state.replace(initialState() as unknown as Record<string, unknown>);
 
+  mediaServer.start();
   photoCache.init(api);
   peopleSearchDisk = new DiskCache<PeopleResults>(api.pluginName, 'people-search', {
     hardTtlMs: 24 * 60 * 60_000,
     maxEntries: PEOPLE_CACHE_MAX,
+  });
+  threadCache = new DiskCache(api.pluginName, 'threads', {
+    hardTtlMs: 7 * 24 * 60 * 60_000,
+    maxEntries: 100,
   });
   for (const [k, e] of peopleSearchDisk.entries()) {
     peopleSearchCache.set(k, { at: e.at, results: e.v });
@@ -1245,7 +1321,9 @@ export async function deactivate(): Promise<void> {
   for (const t of chatRefreshDebounce.values()) clearTimeout(t);
   chatRefreshDebounce.clear();
   photoCache.flush();
-  peopleSearchDisk?.flush();
+  peopleSearchDisk?.dispose();
+  threadCache?.dispose();
+  mediaServer.stop();
   pollTimer = null;
   refreshTimer = null;
   unsubConfig = null;

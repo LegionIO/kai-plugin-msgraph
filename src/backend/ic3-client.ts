@@ -48,6 +48,27 @@ export function clearIC3State(): void {
   region = null;
 }
 
+const TRUSTED_SUFFIXES = [
+  '.teams.microsoft.com',
+  '.office.com',
+  '.skype.com',
+  '.cloud.microsoft',
+];
+
+function trustedUrl(candidate: string | undefined, fallback: string): string {
+  if (!candidate) return fallback;
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== 'https:') return fallback;
+    const h = u.hostname.toLowerCase();
+    if (h === 'teams.microsoft.com' || TRUSTED_SUFFIXES.some((s) => h.endsWith(s))) {
+      return candidate;
+    }
+  } catch { /* fall through */ }
+  getLogger().warn(`IC3: rejecting untrusted region URL "${candidate}", using ${fallback}`);
+  return fallback;
+}
+
 export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
   const session = tokenCache.currentSession();
   if (region && region.session === session && region.expiresAt > Date.now() + 60_000) {
@@ -75,9 +96,9 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
         };
       };
       const g = j.regionGtms ?? {};
-      chatServiceAfd = g.chatServiceAfd || g.chatService || TEAMS_CHATSVC_FALLBACK;
-      presenceUPS = g.presenceUPS || TEAMS_UPS_FALLBACK;
-      registrarUrl = g.calling_registrarUrl || TEAMS_REGISTRAR_FALLBACK;
+      chatServiceAfd = trustedUrl(g.chatServiceAfd || g.chatService, TEAMS_CHATSVC_FALLBACK);
+      presenceUPS = trustedUrl(g.presenceUPS, TEAMS_UPS_FALLBACK);
+      registrarUrl = trustedUrl(g.calling_registrarUrl, TEAMS_REGISTRAR_FALLBACK);
       skypeToken = j.tokens?.skypeToken ?? null;
       if (typeof j.tokens?.expiresIn === 'number') ttlMs = Math.max(5 * 60_000, j.tokens.expiresIn * 1000 - 60_000);
     } else {
@@ -174,11 +195,8 @@ export async function setStatusNote(
 }
 
 let lastTypingSent: Record<string, number> = {};
-/** Emit a Control/Typing indicator into a chat, throttled to once per 4s per chat. */
-export async function sendTyping(api: PluginAPI, chatId: string): Promise<void> {
-  const now = Date.now();
-  if (now - (lastTypingSent[chatId] ?? 0) < 4000) return;
-  lastTypingSent[chatId] = now;
+
+async function postControl(api: PluginAPI, chatId: string, messagetype: string): Promise<void> {
   const [rgn, ic3] = await Promise.all([ensureRegion(api), ic3Token(api)]);
   const resp = await api.fetch(
     `${rgn.chatServiceAfd}/v1/users/ME/conversations/${encodeURIComponent(chatId)}/messages`,
@@ -190,10 +208,25 @@ export async function sendTyping(api: PluginAPI, chatId: string): Promise<void> 
         'x-ms-migration': 'True',
         clientinfo: CLIENT_INFO,
       },
-      body: JSON.stringify({ messagetype: 'Control/Typing', contenttype: 'Application/Message', content: '' }),
+      body: JSON.stringify({ messagetype, contenttype: 'Application/Message', content: '' }),
     },
   );
-  if (!resp.ok) getLogger().warn(`sendTyping ${resp.status}`);
+  if (!resp.ok) getLogger().warn(`${messagetype} ${resp.status}`);
+}
+
+/** Emit a Control/Typing indicator into a chat, throttled to once per 4s per chat. */
+export async function sendTyping(api: PluginAPI, chatId: string): Promise<void> {
+  const now = Date.now();
+  if (now - (lastTypingSent[chatId] ?? 0) < 4000) return;
+  lastTypingSent[chatId] = now;
+  await postControl(api, chatId, 'Control/Typing');
+}
+
+/** Clear the typing indicator immediately (called on send). */
+export async function sendClearTyping(api: PluginAPI, chatId: string): Promise<void> {
+  if (lastTypingSent[chatId] === undefined) return;
+  delete lastTypingSent[chatId];
+  await postControl(api, chatId, 'Control/ClearTyping');
 }
 
 export function clearTypingThrottle(): void {

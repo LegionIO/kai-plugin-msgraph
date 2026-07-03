@@ -29,6 +29,7 @@ export type TrouterEvent =
   | { kind: 'message'; chatId: string; messageId: string; fromUserId: string | null; fromName: string | null; own: boolean }
   | { kind: 'messageUpdate'; chatId: string; messageId: string }
   | { kind: 'typing'; chatId: string; fromUserId: string; fromName: string | null }
+  | { kind: 'clearTyping'; chatId: string; fromUserId: string }
   | { kind: 'readReceipt'; chatId: string; userId: string; lastReadMessageId: string }
   | { kind: 'conversationUpdate'; chatId: string }
   | { kind: 'presence'; userId: string; availability: string; activity: string };
@@ -67,11 +68,13 @@ export class TrouterListener {
   private readonly epid = randomUUID();
   private readonly corId = randomUUID();
   private conNum = 0;
+  private gen = 0;
   private hbTimer: ReturnType<typeof setInterval> | null = null;
   private regTimer: ReturnType<typeof setInterval> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffMs = 1000;
   private stopped = false;
+  private tlsInsecureFallback = false;
   private connectparams: Record<string, unknown> = {};
   private surl: string | null = null;
   private presenceSubs = new Set<string>();
@@ -100,24 +103,34 @@ export class TrouterListener {
 
   stop(): void {
     this.stopped = true;
+    this.gen++;
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
     if (this.regTimer) { clearInterval(this.regTimer); this.regTimer = null; }
+    this.surl = null;
     try { this.ws?.close(); } catch { /* ignore */ }
     this.ws = null;
   }
 
+  private live(g: number): boolean {
+    return !this.stopped && g === this.gen;
+  }
+
   private async connect(): Promise<void> {
+    const g = ++this.gen;
     if (this.stopped) return;
     let rgn;
     try {
       rgn = await ensureRegion(this.api);
     } catch (err) {
+      if (!this.live(g)) return;
       getLogger().warn(`trouter: region acquire failed (${err}); retrying`);
       return this.scheduleReconnect();
     }
+    if (!this.live(g)) return;
     if (!rgn.skypeToken) {
       getLogger().warn('trouter: no skypetoken; real-time disabled');
+      this.onEvent({ kind: 'disconnected', willRetry: false });
       return;
     }
     const skypeToken = rgn.skypeToken;
@@ -129,14 +142,13 @@ export class TrouterListener {
       `${TROUTER_CONNECT_URL}?tc=${tc}&timeout=40&epid=${this.epid}&ccid=` +
       `&dom=teams.microsoft.com&cor_id=${this.corId}&con_num=${Date.now()}_${this.conNum++}`;
 
-    getLogger().info(`trouter: connecting (epid=${this.epid})`);
-    // Corporate TLS interception (Zscaler et al.) breaks Node's bundled CA set on
-    // *.trouter.teams.microsoft.com. Honor NODE_EXTRA_CA_CERTS if present; otherwise
-    // fall back to no-verify since api.fetch (Electron net) already validated
-    // teams.microsoft.com when fetching the skypetoken this connection authenticates with.
+    getLogger().info(`trouter: connecting (epid=${this.epid}, tlsVerify=${!this.tlsInsecureFallback})`);
     const ws = new WS(url, {
       origin: 'https://teams.microsoft.com',
-      rejectUnauthorized: !!process.env.NODE_EXTRA_CA_CERTS,
+      // Verify by default. Corporate TLS interception may break Node's CA set;
+      // on a cert error we retry once with verification disabled, surfaced via
+      // state.realtimeError so the user knows.
+      rejectUnauthorized: !this.tlsInsecureFallback,
       handshakeTimeout: 15_000,
     });
     this.ws = ws;
@@ -150,11 +162,13 @@ export class TrouterListener {
       send(`3:::${JSON.stringify({ id: reqId, status, headers: {}, body: '' })}`);
 
     ws.on('open', () => {
+      if (!this.live(g)) { try { ws.close(); } catch { /* ignore */ } return; }
       if (this.hbTimer) clearInterval(this.hbTimer);
       this.hbTimer = setInterval(() => send('2::'), HEARTBEAT_MS);
     });
 
     ws.on('message', (data) => {
+      if (!this.live(g)) return;
       const raw = typeof data === 'string' ? data : data.toString('utf-8');
       const f = parseFrame(raw);
       if (!f) return;
@@ -180,7 +194,7 @@ export class TrouterListener {
             ack(f.id);
             emit('user.activity', { state: 'active', cv: `${this.corId}.${this.conNum}` });
             this.backoffMs = 1000;
-            if (info.surl) void this.register(info.surl);
+            if (info.surl) void this.register(g, info.surl);
             this.onEvent({ kind: 'connected' });
           } else if (j.name === 'trouter.reconnect') {
             const info = (j.args?.[0] ?? {}) as { connectparams?: Record<string, unknown> };
@@ -211,13 +225,26 @@ export class TrouterListener {
       if (this.regTimer) { clearInterval(this.regTimer); this.regTimer = null; }
       if (this.ws === ws) this.ws = null;
       getLogger().info(`trouter: closed (${code} ${reason?.toString?.() ?? ''})`);
-      this.onEvent({ kind: 'disconnected', willRetry: !this.stopped });
-      if (!this.stopped) this.scheduleReconnect();
+      if (!this.live(g)) return;
+      this.onEvent({ kind: 'disconnected', willRetry: true });
+      this.scheduleReconnect();
     });
     ws.on('error', (e) => {
       const msg = e instanceof Error ? e.message : String(e);
+      const code = (e as NodeJS.ErrnoException).code ?? '';
+      const isCert = /CERT|SELF_SIGNED|UNABLE_TO_VERIFY|DEPTH_ZERO/i.test(code) ||
+        /certificate|self[- ]signed/i.test(msg);
+      if (isCert && !this.tlsInsecureFallback) {
+        this.tlsInsecureFallback = true;
+        getLogger().warn(
+          `trouter: TLS verification failed (${code || msg}); retrying without verification. ` +
+          `Set NODE_EXTRA_CA_CERTS to your corporate CA to avoid this.`,
+        );
+        if (this.live(g)) this.onEvent({ kind: 'error', message: `TLS unverified fallback: ${code || msg}` });
+        return;
+      }
       getLogger().warn(`trouter: ws error ${msg}`);
-      this.onEvent({ kind: 'error', message: msg });
+      if (this.live(g)) this.onEvent({ kind: 'error', message: msg });
     });
   }
 
@@ -231,9 +258,10 @@ export class TrouterListener {
     }, delay);
   }
 
-  private async register(surl: string): Promise<void> {
+  private async register(g: number, surl: string): Promise<void> {
     try {
       const [rgn, ic3] = await Promise.all([ensureRegion(this.api), ic3Token(this.api)]);
+      if (!this.live(g)) return;
       const resp = await this.api.fetch(rgn.registrarUrl, {
         method: 'POST',
         headers: {
@@ -260,11 +288,12 @@ export class TrouterListener {
     } catch (err) {
       getLogger().warn(`trouter: registrar failed (${err})`);
     }
+    if (!this.live(g)) return;
     this.surl = surl;
     if (this.presenceSubs.size) void this.sendPresenceSub([...this.presenceSubs], true);
     if (this.regTimer) clearInterval(this.regTimer);
     this.regTimer = setInterval(() => {
-      if (this.surl && !this.stopped) void this.register(this.surl);
+      if (this.surl && this.live(g)) void this.register(g, this.surl);
     }, REGISTRAR_REFRESH_MS);
   }
 
@@ -344,10 +373,14 @@ export class TrouterListener {
     const fromUserId = mriToUserId(res.from);
     const own = !!this.myUserId && fromUserId === this.myUserId;
 
-    if (mt === 'Control/Typing' || mt === 'Control/ClearTyping') {
+    if (mt === 'Control/Typing') {
       if (!own && fromUserId) {
         this.onEvent({ kind: 'typing', chatId, fromUserId, fromName: res.imdisplayname ?? null });
       }
+      return;
+    }
+    if (mt === 'Control/ClearTyping') {
+      if (!own && fromUserId) this.onEvent({ kind: 'clearTyping', chatId, fromUserId });
       return;
     }
     if (mt === 'ThreadActivity/MemberConsumptionHorizonUpdate') {

@@ -306,6 +306,7 @@ export interface ToolPermissions {
   getPresence: boolean;
   setPresence: boolean;
   setStatusMessage: boolean;
+  invokeCardAction: boolean;
 }
 
 export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
@@ -325,6 +326,7 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
   getPresence: true,
   setPresence: true,
   setStatusMessage: true,
+  invokeCardAction: false,
 };
 
 // ── Plugin API (subset used by this plugin) ──

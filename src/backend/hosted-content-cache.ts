@@ -2,19 +2,29 @@ import type { PluginAPI } from '../shared/types.js';
 import { GraphApiError } from '../shared/types.js';
 import { GraphClient } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
+import * as mediaServer from './media-server.js';
 import { getLogger } from './logger-singleton.js';
 
 const cache = new Map<string, string | null>();
 const inFlight = new Set<string>();
 const CONCURRENCY = 3;
 
+mediaServer.register('hosted', (u) => cache.get(u) ?? undefined);
+
 let publishTimer: ReturnType<typeof setTimeout> | null = null;
 function schedulePublish(api: PluginAPI): void {
   if (publishTimer) return;
   publishTimer = setTimeout(() => {
     publishTimer = null;
-    api.state.set('hostedContents', get());
+    api.state.set('hostedContents', published());
   }, 120);
+}
+
+export function published(): Record<string, string | null> {
+  if (!mediaServer.baseUrl()) return Object.fromEntries(cache);
+  const out: Record<string, string | null> = {};
+  for (const [k, v] of cache) out[k] = v === null ? null : mediaServer.urlFor('hosted', k);
+  return out;
 }
 
 export function get(): Record<string, string | null> {
