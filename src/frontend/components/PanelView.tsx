@@ -566,14 +566,18 @@ function Segments({
         if (seg.type === 'text') return <span key={i}>{seg.text}</span>;
         if (seg.type === 'br') return <br key={i} />;
         if (seg.type === 'image') {
-          const data = hostedContents[seg.url];
-          if (data) {
+          // Graph hostedContents URLs need an auth-bearing backend fetch; anything
+          // else (Giphy/Tenor/CDN) is public and can be rendered directly.
+          const isHosted = /^https:\/\/graph\.microsoft\.com\/.+\/hostedContents\/.+\/\$value$/i.test(seg.url);
+          const src = isHosted ? hostedContents[seg.url] : seg.url;
+          if (src) {
             return (
               <img
                 key={i}
-                src={data}
+                src={src}
                 alt=""
                 onLoad={onContentResize}
+                referrerPolicy="no-referrer"
                 style={{ maxHeight: 320, maxWidth: '100%', display: 'block', margin: '4px 0' }}
                 className="rounded-xl object-contain"
               />
@@ -584,7 +588,7 @@ function Segments({
               key={i}
               className="my-1 rounded-xl bg-background/20 border border-border/40 px-3 py-4 text-[11px] opacity-70 flex items-center gap-2"
             >
-              {data === null ? '⚠️ image unavailable' : (
+              {src === null ? '⚠️ image unavailable' : (
                 <>
                   <span className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
                   loading image…
