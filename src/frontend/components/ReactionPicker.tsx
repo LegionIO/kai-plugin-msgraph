@@ -29,8 +29,12 @@ export function ReactionPicker({
     setCustom('');
   };
 
-  const anchor: React.CSSProperties = { position: 'absolute', top: -4, right: 0, transform: 'translateY(-100%)' };
-  void align;
+  const anchor: React.CSSProperties = {
+    position: 'absolute',
+    top: -4,
+    transform: 'translateY(-100%)',
+    ...(align === 'right' ? { right: 0 } : { left: 0 }),
+  };
 
   if (!expanded) {
     return (

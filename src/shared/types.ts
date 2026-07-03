@@ -340,6 +340,8 @@ export interface MsgraphPluginState {
   cardActionPending: string | null;
   activeChatId: string | null;
   activeChatMessages: NormalizedMessage[];
+  activeChatMessagesNextLink: string | null;
+  loadingOlderMessages: boolean;
   /** Real-time push connection status. */
   realtime: 'connecting' | 'connected' | 'disconnected' | 'disabled';
   realtimeError: string | null;

@@ -134,6 +134,8 @@ function initialState(): MsgraphPluginState {
     cardActionPending: null,
     activeChatId: null,
     activeChatMessages: [],
+    activeChatMessagesNextLink: null,
+    loadingOlderMessages: false,
     realtime: 'disabled',
     realtimeError: null,
     typing: {},
@@ -326,7 +328,7 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
   api.state.set('error', null);
   try {
     const client = await ensureAuthenticated(api);
-    const msgs = await client.getChatMessages(chatId, 40);
+    const { messages: msgs, nextLink } = await client.getChatMessages(chatId, 40);
     if (seq !== messageLoadSeq) return;
     const myId = tokenCache.getObjectId();
     const normalized = msgs
@@ -334,6 +336,7 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
       .filter((m) => !m.deleted)
       .reverse();
     api.state.set('activeChatMessages', normalized);
+    api.state.set('activeChatMessagesNextLink', nextLink);
     threadCache?.set(chatId, normalized);
     const userIds = new Set<string>();
     const appIds = new Set<string>();
@@ -736,6 +739,43 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
       case 'clear-search': {
         remoteSearchSeq++;
         api.state.set('remoteSearch', null);
+        break;
+      }
+      case 'load-older-messages': {
+        const st0 = api.state.get() as Partial<MsgraphPluginState>;
+        const link = st0.activeChatMessagesNextLink;
+        const chatId = st0.activeChatId;
+        if (!link || !chatId || st0.loadingOlderMessages) break;
+        const seq = messageLoadSeq;
+        api.state.set('loadingOlderMessages', true);
+        try {
+          const client = await ensureAuthenticated(api, false);
+          const { messages: page, nextLink } = await client.getChatMessagesPage(link);
+          if (seq !== messageLoadSeq) break;
+          const myId = tokenCache.getObjectId();
+          const cur = (api.state.get() as Partial<MsgraphPluginState>).activeChatMessages ?? [];
+          const have = new Set(cur.map((m) => m.id));
+          const older = page
+            .map((m) => normalizeMessage(m, myId))
+            .filter((m) => !m.deleted && !have.has(m.id))
+            .reverse();
+          const merged = [...older, ...cur];
+          api.state.set('activeChatMessages', merged);
+          api.state.set('activeChatMessagesNextLink', nextLink);
+          threadCache?.set(chatId, merged);
+          const userIds = new Set<string>();
+          const appIds = new Set<string>();
+          const hosted = new Set<string>();
+          for (const m of older) {
+            if (m.fromId) (m.fromApp ? appIds : userIds).add(m.fromId);
+            for (const u of m.hostedImages) hosted.add(u);
+          }
+          photoCache.ensure(api, client, userIds);
+          photoCache.ensureApps(api, client, appIds);
+          hostedContentCache.ensure(api, client, hosted);
+        } finally {
+          if (seq === messageLoadSeq) api.state.set('loadingOlderMessages', false);
+        }
         break;
       }
       case 'select-chat': {

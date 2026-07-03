@@ -5,45 +5,25 @@ import DOMPurify from 'dompurify';
 const BLANK_PX = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 const isExternal = (u: string) => /^https?:\/\//i.test(u);
 
-/** Rewrite near-black inline `color:` values to `inherit` so mail authored for a
- *  white background stays readable in dark mode; leave chromatic colours alone. */
-function neutralizeDarkText(style: string): string {
-  return style.replace(
-    /(^|;)\s*color\s*:\s*([^;]+)/gi,
-    (m, sep: string, val: string) => (isNearBlack(val.trim()) ? `${sep}color:inherit` : m),
-  );
-}
-function isNearBlack(v: string): boolean {
-  const s = v.toLowerCase().replace(/\s+/g, '');
-  if (s === 'black' || s === 'currentcolor' || s === 'windowtext') return true;
-  let r = 255, g = 255, b = 255;
-  let m = /^#([0-9a-f]{3})$/.exec(s);
-  if (m) { r = parseInt(m[1][0], 16) * 17; g = parseInt(m[1][1], 16) * 17; b = parseInt(m[1][2], 16) * 17; }
-  else if ((m = /^#([0-9a-f]{6})([0-9a-f]{2})?$/.exec(s))) { r = parseInt(m[1].slice(0, 2), 16); g = parseInt(m[1].slice(2, 4), 16); b = parseInt(m[1].slice(4, 6), 16); }
-  else if ((m = /^rgba?\((\d+),(\d+),(\d+)/.exec(s))) { r = +m[1]; g = +m[2]; b = +m[3]; }
-  else return false;
-  // Rec.709 luma; ~0.25 threshold catches greys up to ~#404040 while keeping brand colours.
-  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.25;
-}
-
 let cssInjected = false;
 function ensureCss() {
   if (cssInjected || typeof document === 'undefined') return;
   const s = document.createElement('style');
   s.setAttribute('data-msgraph-mail', '');
+  // Mail HTML is authored for a white page; rendering it on the app's dark
+  // theme is a losing game (dark-on-dark, light-on-white, invisible borders).
+  // Do what every mail client does: give the body its own light card.
   s.textContent = `
-.msg-mailbody{color:inherit;font-family:inherit;font-size:13px;line-height:1.5;overflow-wrap:break-word}
+.msg-mailbody{background:#ffffff;color:#1f2937;border-radius:10px;padding:16px 18px;font-family:inherit;font-size:13px;line-height:1.5;overflow-wrap:break-word;color-scheme:light}
 .msg-mailbody *{max-width:100% !important}
-.msg-mailbody body,.msg-mailbody html{background:transparent !important;color:inherit !important}
+.msg-mailbody body,.msg-mailbody html{background:transparent !important}
 .msg-mailbody table{border-collapse:collapse;width:auto !important;max-width:100%}
-.msg-mailbody td,.msg-mailbody th{border-color:rgba(127,127,127,.3)}
+.msg-mailbody td,.msg-mailbody th{border-color:rgba(0,0,0,.15)}
 .msg-mailbody img{max-width:100%;height:auto}
 .msg-mailbody a{color:#2563eb;text-decoration:underline}
-.dark .msg-mailbody a{color:#60a5fa}
 .msg-mailbody p{margin:0 0 .6em}
-.msg-mailbody blockquote{border-left:2px solid rgba(127,127,127,.4);margin:.5em 0;padding:.2em 0 .2em .8em;color:inherit}
+.msg-mailbody blockquote{border-left:2px solid rgba(0,0,0,.2);margin:.5em 0;padding:.2em 0 .2em .8em}
 .msg-mailbody pre,.msg-mailbody code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.msg-mailbody font[color]{color:inherit !important}
 `;
   document.head.appendChild(s);
   cssInjected = true;
@@ -54,15 +34,9 @@ function ensureHooks() {
   if (hooked) return;
   hooked = true;
   DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-    if (!(node instanceof Element)) return;
-    if (node.tagName === 'A') {
+    if (node instanceof Element && node.tagName === 'A') {
       node.setAttribute('target', '_blank');
       node.setAttribute('rel', 'noopener noreferrer');
-    }
-    if (node.hasAttribute('color')) node.removeAttribute('color');
-    const style = node.getAttribute('style');
-    if (style && /color\s*:/i.test(style)) {
-      node.setAttribute('style', neutralizeDarkText(style));
     }
   });
 }

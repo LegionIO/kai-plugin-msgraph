@@ -222,6 +222,22 @@ export class GraphClient {
   }
 
   async getUserByEmail(email: string): Promise<GraphUser | null> {
+    // /users/{email} only matches UPN; many senders' `mail` differs from UPN
+    // (e.g. @uhg.com vs @optum.com), so filter on both.
+    const q = email.replace(/'/g, "''");
+    try {
+      const r = await this.directoryGet<GraphList<GraphUser>>('/users', {
+        query: {
+          $filter: `mail eq '${q}' or userPrincipalName eq '${q}'`,
+          $select: 'id,displayName,userPrincipalName,mail',
+          $top: '1',
+        },
+      });
+      if (r.value[0]) return r.value[0];
+    } catch (err) {
+      if (!(err instanceof GraphApiError) || (err.statusCode !== 404 && err.statusCode !== 400)) throw err;
+    }
+    // Fallback for guest/external where filter isn't indexed: try direct.
     try {
       return await this.directoryGet<GraphUser>(`/users/${encodeURIComponent(email)}`, {
         query: { $select: 'id,displayName,userPrincipalName,mail' },
@@ -260,13 +276,21 @@ export class GraphClient {
     });
   }
 
-  async getChatMessages(chatId: string, top = DEFAULT_MESSAGE_TOP): Promise<GraphMessage[]> {
+  async getChatMessages(
+    chatId: string,
+    top = DEFAULT_MESSAGE_TOP,
+  ): Promise<{ messages: GraphMessage[]; nextLink: string | null }> {
     const r = await this.request<GraphList<GraphMessage>>(
       'GET',
       `/chats/${encodeURIComponent(chatId)}/messages`,
       { query: { $top: String(top), $orderby: 'createdDateTime desc' } },
     );
-    return r.value;
+    return { messages: r.value, nextLink: r['@odata.nextLink'] ?? null };
+  }
+
+  async getChatMessagesPage(nextLink: string): Promise<{ messages: GraphMessage[]; nextLink: string | null }> {
+    const r = await this.request<GraphList<GraphMessage>>('GET', nextLink);
+    return { messages: r.value, nextLink: r['@odata.nextLink'] ?? null };
   }
 
   /** Fetch an auth-protected Graph hostedContents/$value URL and return a data URL. */

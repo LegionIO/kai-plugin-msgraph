@@ -535,16 +535,31 @@ function ReadingPane({
 }
 
 function ActionBtn({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
+  const [hover, setHover] = useState(false);
   return (
     <button
       type="button"
-      title={title}
+      aria-label={title}
       onClick={onClick}
-      className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      className="relative p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
     >
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
         {children}
       </svg>
+      {hover && (
+        <span
+          style={{
+            position: 'absolute', top: '100%', right: 0, marginTop: 6, whiteSpace: 'nowrap',
+            fontSize: 10, lineHeight: '14px', padding: '3px 7px', borderRadius: 5, zIndex: 20,
+            pointerEvents: 'none',
+          }}
+          className="bg-foreground text-background shadow-md"
+        >
+          {title}
+        </span>
+      )}
     </button>
   );
 }

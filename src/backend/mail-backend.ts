@@ -110,7 +110,9 @@ function ensureSenderPhotos(api: PluginAPI, client: GraphClient, messages: Norma
       } finally {
         senderInFlight.delete(addr);
       }
-      senderIdCache?.set(addr, found[addr]);
+      // Only persist successful resolutions so a lookup miss (or a bug in the
+      // lookup path) doesn't stick for the whole TTL.
+      if (found[addr]) senderIdCache?.set(addr, found[addr]);
     }
     if (session !== tokenCache.currentSession()) return;
     api.state.set('mailSenderIds', { ...(st(api).mailSenderIds ?? {}), ...found });

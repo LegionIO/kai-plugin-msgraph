@@ -241,7 +241,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
         try {
           const client = await ensureAuthenticated();
           const { chatId, top } = input as { chatId: string; top?: number };
-          const msgs = await client.getChatMessages(chatId, clampTop(top, 25, 50));
+          const { messages: msgs } = await client.getChatMessages(chatId, clampTop(top, 25, 50));
           const myId = tokenCache.getObjectId();
           const messages = msgs
             .filter((m) => m.messageType === 'message' || m.messageType == null)

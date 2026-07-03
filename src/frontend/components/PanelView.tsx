@@ -18,6 +18,46 @@ import { TaskModuleDialog } from './TaskModuleDialog.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
+function ReactionChip({
+  r,
+  fromMe,
+  onRemove,
+}: {
+  r: import('../../shared/types.ts').NormalizedReaction;
+  fromMe: boolean;
+  onRemove: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={() => r.mine && onRemove()}
+      disabled={!r.mine}
+      className={`relative inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-card border shadow-sm text-[10px] leading-none ${
+        r.mine ? 'border-primary/60 cursor-pointer hover:bg-primary/10' : 'border-border cursor-default'
+      }`}
+    >
+      <span>{r.emoji}</span>
+      {r.count > 1 && <span className="text-muted-foreground">{r.count}</span>}
+      {hover && (
+        <span
+          style={{
+            position: 'absolute', bottom: '100%', [fromMe ? 'left' : 'right']: 0, marginBottom: 6,
+            whiteSpace: 'nowrap', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis',
+            fontSize: 10, lineHeight: '14px', padding: '3px 7px', borderRadius: 5, zIndex: 30,
+            pointerEvents: 'none',
+          }}
+          className="bg-foreground text-background shadow-md"
+        >
+          {r.users.join(', ') || '—'}{r.mine ? ' · click to remove' : ''}
+        </span>
+      )}
+    </button>
+  );
+}
+
 function fmtTime(iso: string | null): string {
   if (!iso) return '';
   const d = new Date(iso);
@@ -442,6 +482,33 @@ export function PanelView({ pluginState, onAction }: Props) {
               onScroll={onThreadScroll}
               className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 flex flex-col gap-2"
             >
+              {s.activeChatMessagesNextLink && messages.length > 0 && (
+                <button
+                  type="button"
+                  disabled={!!s.loadingOlderMessages}
+                  onClick={() => {
+                    const el = scrollRef.current;
+                    const anchor = el ? el.scrollHeight - el.scrollTop : 0;
+                    stickToBottomRef.current = false;
+                    onAction('load-older-messages');
+                    // Restore scroll position after older messages prepend.
+                    requestAnimationFrame(() => {
+                      const check = () => {
+                        if (!el) return;
+                        if (el.scrollHeight - el.scrollTop !== anchor) {
+                          el.scrollTop = el.scrollHeight - anchor;
+                        }
+                      };
+                      check();
+                      setTimeout(check, 60);
+                      setTimeout(check, 250);
+                    });
+                  }}
+                  className="self-center px-3 py-1 mb-1 text-[11px] text-muted-foreground border border-border rounded-full hover:text-foreground hover:bg-muted disabled:opacity-50"
+                >
+                  {s.loadingOlderMessages ? 'Loading…' : 'Load older messages'}
+                </button>
+              )}
               {s.loadingMessages && messages.length === 0 && (
                 <div className="text-xs text-muted-foreground">Loading messages…</div>
               )}
@@ -1051,19 +1118,7 @@ function MessageBubble({
               className="flex gap-0.5"
             >
               {m.reactions.map((r) => (
-                <button
-                  key={r.type}
-                  type="button"
-                  title={r.users.join(', ') + (r.mine ? ' — click to remove' : '')}
-                  onClick={() => r.mine && onReact(r.type, true)}
-                  disabled={!r.mine}
-                  className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-card border shadow-sm text-[10px] leading-none ${
-                    r.mine ? 'border-primary/60 cursor-pointer hover:bg-primary/10' : 'border-border cursor-default'
-                  }`}
-                >
-                  <span>{r.emoji}</span>
-                  {r.count > 1 && <span className="text-muted-foreground">{r.count}</span>}
-                </button>
+                <ReactionChip key={r.type} r={r} fromMe={m.fromMe} onRemove={() => onReact(r.type, true)} />
               ))}
             </div>
           )}
