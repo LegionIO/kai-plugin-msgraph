@@ -29,14 +29,22 @@ function schedulePublish(api: PluginAPI): void {
 
 export function init(api: PluginAPI): void {
   mediaServer.register('photo', (id) => cache.get(id) ?? undefined);
-  disk = new DiskCache<string | null>(api.pluginName, 'photos', { hardTtlMs: HARD_TTL_MS, maxEntries: 2000 });
-  const now = Date.now();
-  for (const [k, e] of disk.entries()) {
-    cache.set(k, e.v);
-    if (now - e.at > SOFT_TTL_MS) staleAt.set(k, e.at);
-  }
-  api.state.set('photos', published());
-  getLogger().info(`photo-cache: hydrated ${cache.size} entries from disk (${staleAt.size} stale)`);
+  disk = new DiskCache<string | null>(
+    api.pluginName,
+    'photos',
+    { hardTtlMs: HARD_TTL_MS, maxEntries: 2000 },
+    () => {
+      const now = Date.now();
+      for (const [k, e] of disk!.entries()) {
+        if (!cache.has(k)) {
+          cache.set(k, e.v);
+          if (now - e.at > SOFT_TTL_MS) staleAt.set(k, e.at);
+        }
+      }
+      getLogger().info(`photo-cache: hydrated ${cache.size} entries from disk (${staleAt.size} stale)`);
+      schedulePublish(api);
+    },
+  );
 }
 
 /** State-facing view: local-server URLs when available, else raw data-URLs. */

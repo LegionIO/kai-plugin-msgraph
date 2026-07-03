@@ -8,10 +8,15 @@ import { Avatar } from './Avatar.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
-const FOLDER_ICON: Record<string, string> = {
-  inbox: '📥', drafts: '📝', sentitems: '📤', archive: '🗄️',
-  deleteditems: '🗑️', junkemail: '⚠️',
+const FOLDER_ICON: Record<string, React.ReactNode> = {
+  inbox: (<><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m2 7 10 6 10-6" /></>),
+  drafts: (<><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" /></>),
+  sentitems: (<><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></>),
+  archive: (<><rect x="2" y="3" width="20" height="5" rx="1" /><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4" /></>),
+  deleteditems: (<><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></>),
+  junkemail: (<><circle cx="12" cy="12" r="10" /><path d="m4.9 4.9 14.2 14.2" /></>),
 };
+const GENERIC_FOLDER = (<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 8 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />);
 
 function fmtWhen(iso: string | null): string {
   if (!iso) return '';
@@ -84,82 +89,96 @@ export function MailPanelView({ pluginState, onAction }: Props) {
 
   return (
     <div ref={panelRef} className="flex flex-col text-foreground" style={panelHeight ? { height: panelHeight } : undefined}>
-      {/* Top bar: search + compose (left)  ·  refresh + avatar (right) */}
-      <div className="flex items-center gap-2 border-b border-border/50 px-3 py-2 shrink-0">
-        <div className="relative" style={{ width: 320 }}>
-          <input
-            value={search}
-            onChange={(e) => onSearchInput(e.target.value)}
-            placeholder="Search mail…"
-            style={{ paddingLeft: 26, paddingRight: search ? 24 : 8 }}
-            className="w-full rounded-md border border-border bg-background py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
-          />
-          <svg
-            className="w-3.5 h-3.5 absolute left-2 text-muted-foreground"
-            style={{ top: '50%', transform: 'translateY(-50%)' }}
-            viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+      {/* Top bar */}
+      <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2 shrink-0">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-foreground">Outlook</h2>
+          <button
+            type="button"
+            title="Refresh"
+            onClick={() => onAction('refresh-mail')}
+            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
           >
-            <circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" />
-          </svg>
-          {search && (
-            <button
-              type="button"
-              onClick={() => onSearchInput('')}
-              className="absolute right-1.5 text-muted-foreground hover:text-foreground text-xs"
-              style={{ top: '50%', transform: 'translateY(-50%)' }}
-            >×</button>
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+              <path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="text-right min-w-0 hidden sm:block">
+            <div className="text-xs font-medium text-foreground truncate">{s.auth?.displayName ?? s.auth?.email}</div>
+            {s.auth?.displayName && (
+              <div className="text-[10px] text-muted-foreground truncate">{s.auth?.email}</div>
+            )}
+          </div>
+          {meId && (
+            <Avatar id={meId} name={s.auth?.displayName ?? s.auth?.email ?? 'Me'} photo={(s.photos ?? {})[meId]} presence={(s.presence ?? {})[meId]} size={8} />
           )}
         </div>
-        <button
-          type="button"
-          title="New mail"
-          onClick={() => onAction('compose-mail', { mode: 'new' })}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 shrink-0"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
-          </svg>
-          New
-        </button>
-        <div className="flex-1" />
-        <button
-          type="button"
-          title="Refresh"
-          onClick={() => onAction('refresh-mail')}
-          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
-            <path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" />
-          </svg>
-        </button>
-        {meId && (
-          <Avatar id={meId} name={s.auth?.displayName ?? s.auth?.email ?? 'Me'} photo={(s.photos ?? {})[meId]} presence={(s.presence ?? {})[meId]} size={7} />
-        )}
       </div>
 
       <div className="flex flex-1 min-h-0">
-        {/* Folder tree */}
-        <div className="flex flex-col border-r border-border/50 min-h-0 shrink-0" style={{ width: 190 }}>
-          <div className="flex-1 overflow-y-auto py-2">
-            {folders.map((f) => (
-              <FolderRow
-                key={f.id}
-                f={f}
-                active={!searching && (activeFolder === f.id || activeFolder === f.wellKnownName)}
-                expanded={(s.mailFoldersExpanded ?? []).includes(f.id)}
-                onClick={() => { setSearch(''); onAction('select-folder', { folderId: f.wellKnownName ?? f.id }); }}
-                onToggle={() => onAction('toggle-folder', { folderId: f.id })}
+        {/* Left: search+compose header, then folders | message list */}
+        <div className="flex flex-col border-r border-border/50 min-h-0 shrink-0" style={{ width: 510 }}>
+          <div className="flex items-center gap-1.5 px-3 pt-3 pb-2 shrink-0">
+            <div className="relative flex-1 min-w-0">
+              <input
+                value={search}
+                onChange={(e) => onSearchInput(e.target.value)}
+                placeholder="Search mail…"
+                style={{ paddingLeft: 26, paddingRight: search ? 24 : 12, paddingTop: 6, paddingBottom: 6 }}
+                className="w-full text-xs bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:border-primary transition-colors"
               />
-            ))}
-            {s.loadingMailFolders && folders.length === 0 && (
-              <div className="px-3 py-2 text-[11px] text-muted-foreground">Loading…</div>
-            )}
+              <svg
+                className="w-3.5 h-3.5 absolute left-2 text-muted-foreground"
+                style={{ top: '50%', transform: 'translateY(-50%)' }}
+                viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+              >
+                <circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" />
+              </svg>
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => onSearchInput('')}
+                  className="absolute right-1.5 text-muted-foreground hover:text-foreground text-xs"
+                  style={{ top: '50%', transform: 'translateY(-50%)' }}
+                >×</button>
+              )}
+            </div>
+            <button
+              type="button"
+              title="New mail"
+              onClick={() => onAction('compose-mail', { mode: 'new' })}
+              className="p-1.5 rounded-lg border border-border bg-muted text-muted-foreground hover:text-foreground hover:border-primary transition-colors shrink-0"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
+            </button>
           </div>
-        </div>
+          <div className="flex flex-1 min-h-0">
+            {/* Folder tree */}
+            <div className="flex flex-col border-r border-border/50 min-h-0 shrink-0" style={{ width: 190 }}>
+              <div className="flex-1 overflow-y-auto py-1">
+                {folders.map((f) => (
+                  <FolderRow
+                    key={f.id}
+                    f={f}
+                    active={!searching && (activeFolder === f.id || activeFolder === f.wellKnownName)}
+                    expanded={(s.mailFoldersExpanded ?? []).includes(f.id)}
+                    onClick={() => { setSearch(''); onAction('select-folder', { folderId: f.wellKnownName ?? f.id }); }}
+                    onToggle={() => onAction('toggle-folder', { folderId: f.id })}
+                  />
+                ))}
+                {s.loadingMailFolders && folders.length === 0 && (
+                  <div className="px-3 py-2 text-[11px] text-muted-foreground">Loading…</div>
+                )}
+              </div>
+            </div>
 
-        {/* Message list */}
-        <div className="flex flex-col border-r border-border/50 min-h-0" style={{ width: 320, minWidth: 260 }}>
-          <div className="flex-1 overflow-y-auto">
+            {/* Message list */}
+            <div className="flex flex-col min-h-0 flex-1">
+              <div className="flex-1 overflow-y-auto">
             {searching && s.mailSearch?.loading && (
               <div className="px-3 py-3 text-[11px] text-muted-foreground">Searching…</div>
             )}
@@ -184,6 +203,8 @@ export function MailPanelView({ pluginState, onAction }: Props) {
                 {searching ? 'No results' : 'No messages'}
               </div>
             )}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -268,7 +289,12 @@ function FolderRow({
           <path d="m9 18 6-6-6-6" />
         </svg>
       </button>
-      <span className="w-4 text-center shrink-0">{icon ?? '📁'}</span>
+      <svg
+        className="w-3.5 h-3.5 shrink-0 opacity-70"
+        viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      >
+        {icon ?? GENERIC_FOLDER}
+      </svg>
       <span className="flex-1 truncate">{f.displayName}</span>
       {f.unreadItemCount > 0 && (
         <span

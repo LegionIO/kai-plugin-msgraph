@@ -238,16 +238,6 @@ export function PanelView({ pluginState, onAction }: Props) {
           />
           <button
             type="button"
-            title="New chat"
-            onClick={() => setNewChatOpen(true)}
-            className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
-            </svg>
-          </button>
-          <button
-            type="button"
             title="Refresh"
             onClick={() => onAction('refresh-chats')}
             className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
@@ -330,30 +320,42 @@ export function PanelView({ pluginState, onAction }: Props) {
               Unread
             </button>
           </div>
-          <div className="relative">
-            <input
-              style={{ paddingLeft: 12, paddingRight: 32, paddingTop: 6, paddingBottom: 6 }}
-              className="w-full text-xs bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:border-primary transition-colors"
-              placeholder={searchMode === 'people' ? 'Search people & chats…' : 'Search in messages…'}
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
+          <div className="flex items-center gap-1.5">
+            <div className="relative flex-1 min-w-0">
+              <input
+                style={{ paddingLeft: 12, paddingRight: 32, paddingTop: 6, paddingBottom: 6 }}
+                className="w-full text-xs bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:border-primary transition-colors"
+                placeholder={searchMode === 'people' ? 'Search people & chats…' : 'Search in messages…'}
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              />
+              <button
+                type="button"
+                title={searchMode === 'people' ? 'Searching by person — click for content search' : 'Searching in message content — click for people search'}
+                onClick={() => setSearchMode((m) => (m === 'people' ? 'content' : 'people'))}
+                style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)' }}
+                className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-background/60 transition-colors"
+              >
+                {searchMode === 'people' ? (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                  </svg>
+                ) : (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M8 9h8M8 13h5" />
+                  </svg>
+                )}
+              </button>
+            </div>
             <button
               type="button"
-              title={searchMode === 'people' ? 'Searching by person — click for content search' : 'Searching in message content — click for people search'}
-              onClick={() => setSearchMode((m) => (m === 'people' ? 'content' : 'people'))}
-              style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)' }}
-              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-background/60 transition-colors"
+              title="New chat"
+              onClick={() => setNewChatOpen(true)}
+              className="p-1.5 rounded-lg border border-border bg-muted text-muted-foreground hover:text-foreground hover:border-primary transition-colors shrink-0"
             >
-              {searchMode === 'people' ? (
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                </svg>
-              ) : (
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M8 9h8M8 13h5" />
-                </svg>
-              )}
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
             </button>
           </div>
         </div>

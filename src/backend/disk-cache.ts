@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
+import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { getLogger } from './logger-singleton.js';
@@ -22,21 +23,42 @@ export class DiskCache<V> {
   constructor(
     pluginName: string,
     namespace: string,
-    private readonly opts: { hardTtlMs: number; maxEntries?: number } ,
+    private readonly opts: {
+      hardTtlMs: number;
+      maxEntries?: number;
+      /** Load synchronously in the constructor. Only for tiny caches. */
+      sync?: boolean;
+    },
+    private readonly onLoaded?: () => void,
   ) {
     const dir = join(homedir(), '.kai', 'plugin-caches', pluginName);
     mkdirSync(dir, { recursive: true });
     this.file = join(dir, `${namespace}.json`);
-    this.load();
+    if (opts.sync) this.hydrate(this.readSync());
+    else void this.loadAsync();
   }
 
-  private load(): void {
+  private readSync(): string | null {
+    try { return existsSync(this.file) ? readFileSync(this.file, 'utf-8') : null; }
+    catch { return null; }
+  }
+
+  private async loadAsync(): Promise<void> {
     try {
-      if (!existsSync(this.file)) return;
-      const raw = JSON.parse(readFileSync(this.file, 'utf-8')) as Record<string, CacheEntry<V>>;
+      const txt = await readFile(this.file, 'utf-8').catch(() => null);
+      this.hydrate(txt);
+    } finally {
+      this.onLoaded?.();
+    }
+  }
+
+  private hydrate(txt: string | null): void {
+    if (!txt) return;
+    try {
+      const raw = JSON.parse(txt) as Record<string, CacheEntry<V>>;
       const now = Date.now();
       for (const [k, e] of Object.entries(raw)) {
-        if (e && typeof e.at === 'number' && now - e.at < this.opts.hardTtlMs) {
+        if (e && typeof e.at === 'number' && now - e.at < this.opts.hardTtlMs && !this.map.has(k)) {
           this.map.set(k, e);
         }
       }

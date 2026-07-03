@@ -1331,17 +1331,20 @@ export async function activate(api: PluginAPI): Promise<void> {
   mediaServer.start();
   photoCache.init(api);
   initMail(api, (allowInteractive = false) => ensureAuthenticated(api, allowInteractive));
-  peopleSearchDisk = new DiskCache<PeopleResults>(api.pluginName, 'people-search', {
-    hardTtlMs: 24 * 60 * 60_000,
-    maxEntries: PEOPLE_CACHE_MAX,
-  });
+  peopleSearchDisk = new DiskCache<PeopleResults>(
+    api.pluginName,
+    'people-search',
+    { hardTtlMs: 24 * 60 * 60_000, maxEntries: PEOPLE_CACHE_MAX },
+    () => {
+      for (const [k, e] of peopleSearchDisk!.entries()) {
+        if (!peopleSearchCache.has(k)) peopleSearchCache.set(k, { at: e.at, results: e.v });
+      }
+    },
+  );
   threadCache = new DiskCache(api.pluginName, 'threads', {
     hardTtlMs: 7 * 24 * 60 * 60_000,
     maxEntries: 100,
   });
-  for (const [k, e] of peopleSearchDisk.entries()) {
-    peopleSearchCache.set(k, { at: e.at, results: e.v });
-  }
   publishAuthState(api);
   publishCredentialState(api);
 
@@ -1363,6 +1366,7 @@ export async function activate(api: PluginAPI): Promise<void> {
     label: 'Teams',
     icon: { lucide: 'message-square-more' },
     visible: true,
+    priority: 0,
     target: { type: 'panel', panelId: PANEL_ID },
   });
   api.ui.registerNavigationItem({
@@ -1370,6 +1374,7 @@ export async function activate(api: PluginAPI): Promise<void> {
     label: 'Outlook',
     icon: { lucide: 'mail' },
     visible: true,
+    priority: 1,
     target: { type: 'panel', panelId: MAIL_PANEL_ID },
   });
   api.ui.registerSettingsView({

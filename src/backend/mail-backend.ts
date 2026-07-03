@@ -56,7 +56,7 @@ export function mailInitialState(): Pick<
 
 export function initMail(api: PluginAPI, ensure: EnsureFn): void {
   ensureAuthenticated = ensure;
-  deltaCache = new DiskCache<string>(api.pluginName, 'mail-delta', { hardTtlMs: 7 * 24 * 60 * 60_000, maxEntries: 20 });
+  deltaCache = new DiskCache<string>(api.pluginName, 'mail-delta', { hardTtlMs: 7 * 24 * 60 * 60_000, maxEntries: 20, sync: true });
   deltaLink = deltaCache.get('inbox')?.v ?? null;
 }
 
