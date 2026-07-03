@@ -26,8 +26,13 @@ export type TrouterEvent =
   | { kind: 'connected' }
   | { kind: 'disconnected'; willRetry: boolean }
   | { kind: 'error'; message: string }
-  | { kind: 'message'; chatId: string; messageId: string; fromUserId: string | null; fromName: string | null; own: boolean }
-  | { kind: 'messageUpdate'; chatId: string; messageId: string }
+  | { kind: 'message'; chatId: string; messageId: string; fromUserId: string | null; fromName: string | null; own: boolean; preview: string | null }
+  | {
+      kind: 'messageUpdate';
+      chatId: string;
+      messageId: string;
+      reaction: { type: string; userId: string | null } | null;
+    }
   | { kind: 'typing'; chatId: string; fromUserId: string; fromName: string | null }
   | { kind: 'clearTyping'; chatId: string; fromUserId: string }
   | { kind: 'readReceipt'; chatId: string; userId: string; lastReadMessageId: string }
@@ -361,6 +366,7 @@ export class TrouterListener {
         content?: string;
         from?: string;
         imdisplayname?: string;
+        properties?: { emotions?: Array<{ key?: string; users?: Array<{ mri?: string; time?: number }> }> };
       };
     };
     try { body = JSON.parse(req.body); } catch { return; }
@@ -393,6 +399,7 @@ export class TrouterListener {
       return;
     }
     if (rt === 'NewMessage') {
+      const preview = (res.content ?? '').replace(/<[^>]+>/g, '').replace(/&[a-z#0-9]+;/gi, ' ').trim().slice(0, 200) || null;
       this.onEvent({
         kind: 'message',
         chatId,
@@ -400,11 +407,25 @@ export class TrouterListener {
         fromUserId,
         fromName: res.imdisplayname ?? null,
         own,
+        preview,
       });
       return;
     }
     if (rt === 'MessageUpdate') {
-      this.onEvent({ kind: 'messageUpdate', chatId, messageId: String(res.id ?? '') });
+      let reaction: { type: string; userId: string | null } | null = null;
+      const props = (res as { properties?: { emotions?: Array<{ key?: string; users?: Array<{ mri?: string; time?: number }> }> } }).properties;
+      const emo = props?.emotions;
+      if (Array.isArray(emo) && emo.length) {
+        let best: { key: string; mri: string | null; time: number } | null = null;
+        for (const e of emo) {
+          for (const u of e.users ?? []) {
+            const t = Number(u.time ?? 0);
+            if (!best || t > best.time) best = { key: e.key ?? '', mri: u.mri ?? null, time: t };
+          }
+        }
+        if (best?.key) reaction = { type: best.key, userId: mriToUserId(best.mri) };
+      }
+      this.onEvent({ kind: 'messageUpdate', chatId, messageId: String(res.id ?? ''), reaction });
       return;
     }
     if (rt === 'ConversationUpdate') {

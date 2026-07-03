@@ -354,6 +354,15 @@ export interface PluginAPI {
     set: (path: string, value: unknown) => void;
     emitEvent: (eventName: string, data?: unknown) => void;
   };
+  /** Automation event bus (Kai ≥ 1.0.121). Optional so older hosts still load us. */
+  events?: {
+    declare: (decl: {
+      events?: Array<{ event: string; title: string; description?: string; payloadSchema?: Record<string, unknown> }>;
+      actions?: Array<{ targetId: string; title: string; description?: string; inputSchema?: Record<string, unknown> }>;
+    }) => void;
+    emit: (event: string, payload?: unknown) => void;
+    on: (key: string, handler: (event: { key: string; source: string; event: string; payload: unknown; ts: number }) => void) => () => void;
+  };
   tools: {
     register: (tools: unknown[]) => void;
     unregister: (toolNames: string[]) => void;

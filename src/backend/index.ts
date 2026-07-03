@@ -403,8 +403,19 @@ function scheduleMessageMerge(api: PluginAPI, chatId: string, messageId: string)
   }, 150));
 }
 
+function chatDisplayName(api: PluginAPI, chatId: string): string | null {
+  const c = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []).find((x) => x.id === chatId);
+  if (!c) return null;
+  return c.topic ?? (c.members.map((m) => m.displayName).join(', ') || null);
+}
+
+function busEmit(api: PluginAPI, event: string, payload: unknown): void {
+  try { api.events?.emit(event, payload); } catch (err) { getLogger().warn(`events.emit(${event}) failed: ${err}`); }
+}
+
 function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
   const st = api.state.get() as Partial<MsgraphPluginState>;
+  const myId = tokenCache.getObjectId();
   switch (ev.kind) {
     case 'connected':
       api.state.set('realtime', 'connected');
@@ -430,6 +441,11 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
       };
       api.state.set('typing', next);
       typingTimers.set(ev.chatId, setTimeout(() => clearTyping(api, ev.chatId), TYPING_TTL_MS));
+      busEmit(api, 'typing-started', {
+        chatId: ev.chatId,
+        chatTitle: chatDisplayName(api, ev.chatId),
+        from: { id: ev.fromUserId, displayName: ev.fromName },
+      });
       return;
     }
     case 'clearTyping': {
@@ -440,10 +456,31 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
       const cur = st.readReceipts ?? {};
       const forChat = { ...(cur[ev.chatId] ?? {}), [ev.userId]: ev.lastReadMessageId };
       api.state.set('readReceipts', { ...cur, [ev.chatId]: forChat });
+      if (ev.userId !== myId) {
+        busEmit(api, 'message-read', {
+          chatId: ev.chatId,
+          chatTitle: chatDisplayName(api, ev.chatId),
+          reader: {
+            id: ev.userId,
+            displayName: (st.chats ?? []).find((c) => c.id === ev.chatId)?.members.find((m) => m.id === ev.userId)?.displayName ?? null,
+          },
+          lastReadMessageId: ev.lastReadMessageId,
+        });
+      }
       return;
     }
     case 'message': {
       clearTyping(api, ev.chatId);
+      if (!ev.own) {
+        busEmit(api, 'message-received', {
+          chatId: ev.chatId,
+          messageId: ev.messageId,
+          chatTitle: chatDisplayName(api, ev.chatId),
+          from: { id: ev.fromUserId, displayName: ev.fromName },
+          preview: ev.preview,
+          isActiveChat: st.activeChatId === ev.chatId,
+        });
+      }
       if (st.activeChatId === ev.chatId) {
         scheduleMessageMerge(api, ev.chatId, ev.messageId);
       } else if (!ev.own) {
@@ -460,6 +497,18 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
     }
     case 'messageUpdate': {
       if (st.activeChatId === ev.chatId) scheduleMessageMerge(api, ev.chatId, ev.messageId);
+      if (ev.reaction && ev.reaction.userId !== myId) {
+        busEmit(api, 'reaction-added', {
+          chatId: ev.chatId,
+          messageId: ev.messageId,
+          chatTitle: chatDisplayName(api, ev.chatId),
+          reaction: ev.reaction.type,
+          from: {
+            id: ev.reaction.userId,
+            displayName: (st.chats ?? []).find((c) => c.id === ev.chatId)?.members.find((m) => m.id === ev.reaction!.userId)?.displayName ?? null,
+          },
+        });
+      }
       return;
     }
     case 'conversationUpdate':
@@ -468,11 +517,19 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
       return;
     case 'presence': {
       const cur = st.presence ?? {};
-      const prev = cur[ev.userId] ?? {};
+      const prev = cur[ev.userId];
       api.state.set('presence', {
         ...cur,
-        [ev.userId]: { ...prev, availability: ev.availability, activity: ev.activity },
+        [ev.userId]: { ...(prev ?? {}), availability: ev.availability, activity: ev.activity },
       });
+      if (!prev || prev.availability !== ev.availability || prev.activity !== ev.activity) {
+        busEmit(api, 'presence-changed', {
+          userId: ev.userId,
+          availability: ev.availability,
+          activity: ev.activity,
+          previous: prev ? { availability: prev.availability, activity: prev.activity } : null,
+        });
+      }
       return;
     }
   }
@@ -1270,6 +1327,98 @@ export async function activate(api: PluginAPI): Promise<void> {
 
   api.onAction(`panel:${PANEL_ID}`, (action, data) => handlePanelAction(api, action, data));
   api.onAction('settings:SettingsView', (action, data) => handleSettingsAction(api, action, data));
+
+  try {
+    api.events?.declare({
+      events: [
+        {
+          event: 'message-received',
+          title: 'Message received',
+          description: 'A new Teams chat message arrived (not sent by you).',
+          payloadSchema: {
+            type: 'object',
+            properties: {
+              chatId: { type: 'string' },
+              messageId: { type: 'string' },
+              chatTitle: { type: 'string' },
+              from: { type: 'object', properties: { id: { type: 'string' }, displayName: { type: 'string' } } },
+              preview: { type: 'string' },
+              isActiveChat: { type: 'boolean' },
+            },
+          },
+        },
+        {
+          event: 'reaction-added',
+          title: 'Reaction added',
+          description: 'Someone reacted to a message in one of your chats.',
+          payloadSchema: {
+            type: 'object',
+            properties: {
+              chatId: { type: 'string' },
+              messageId: { type: 'string' },
+              chatTitle: { type: 'string' },
+              reaction: { type: 'string' },
+              from: { type: 'object', properties: { id: { type: 'string' }, displayName: { type: 'string' } } },
+            },
+          },
+        },
+        {
+          event: 'message-read',
+          title: 'Message read',
+          description: 'A chat member advanced their read receipt (viewed your messages).',
+          payloadSchema: {
+            type: 'object',
+            properties: {
+              chatId: { type: 'string' },
+              chatTitle: { type: 'string' },
+              reader: { type: 'object', properties: { id: { type: 'string' }, displayName: { type: 'string' } } },
+              lastReadMessageId: { type: 'string' },
+            },
+          },
+        },
+        {
+          event: 'typing-started',
+          title: 'Typing started',
+          description: 'Someone started typing in a chat.',
+          payloadSchema: {
+            type: 'object',
+            properties: {
+              chatId: { type: 'string' },
+              chatTitle: { type: 'string' },
+              from: { type: 'object', properties: { id: { type: 'string' }, displayName: { type: 'string' } } },
+            },
+          },
+        },
+        {
+          event: 'presence-changed',
+          title: 'Presence changed',
+          description: "A subscribed user's Teams availability changed.",
+          payloadSchema: {
+            type: 'object',
+            properties: {
+              userId: { type: 'string' },
+              availability: { type: 'string' },
+              activity: { type: 'string' },
+              previous: { type: 'object' },
+            },
+          },
+        },
+      ],
+      actions: [
+        {
+          targetId: `panel:${PANEL_ID}`,
+          title: 'Teams panel action',
+          description:
+            'Dispatch a panel action. Set the action verb to one of: send-message {chatId,text}, ' +
+            'react-to-message {chatId,messageId,reactionType}, mark-chat-read {chatId}, ' +
+            'set-presence {availability}, set-status-message {message,pinned}, select-chat {chatId}.',
+          inputSchema: { type: 'object', additionalProperties: true },
+        },
+      ],
+    });
+  } catch (err) {
+    log.warn(`events.declare unavailable: ${err}`);
+  }
 
   registerEnabledTools(api);
 
