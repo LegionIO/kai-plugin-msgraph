@@ -649,6 +649,7 @@ export function PanelView({ pluginState, onAction }: Props) {
         <NewChatDialog
           state={s}
           photos={photos}
+          presence={presence}
           onAction={onAction}
           onClose={() => setNewChatOpen(false)}
         />

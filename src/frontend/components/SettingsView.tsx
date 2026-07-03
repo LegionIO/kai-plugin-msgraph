@@ -38,49 +38,179 @@ const TOOL_LABELS: Record<keyof ToolPermissions, string> = {
   createGroupChat: 'create-group-chat — new group + optional first message',
 };
 
+const SIG_EDITOR_CSS = `
+.msg-sig-editor img[data-sig-unresolved] {
+  min-width: 24px; min-height: 24px;
+  outline: 2px dashed #f97316; outline-offset: 1px;
+  background: #fff7ed
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f97316' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='3' width='18' height='18' rx='2'/><circle cx='9' cy='9' r='2'/><path d='m21 15-5-5L5 21'/></svg>")
+    center/18px no-repeat;
+  cursor: pointer;
+}
+.msg-sig-editor img[data-sig-unresolved]:hover { outline-color: #ea580c; background-color: #ffedd5; }
+`;
+
 function SignatureEditor({ value, onChange }: { value: string; onChange: (html: string) => void }) {
   const ref = React.useRef<HTMLDivElement>(null);
+  const fileRef = React.useRef<HTMLInputElement>(null);
+  const targetImgRef = React.useRef<HTMLImageElement | null>(null);
   const [showRaw, setShowRaw] = React.useState(false);
   const [raw, setRaw] = React.useState(value);
-  React.useEffect(() => { setRaw(value); if (ref.current && !showRaw) ref.current.innerHTML = value; }, [value]);
-  React.useEffect(() => { if (ref.current && !showRaw) ref.current.innerHTML = raw; }, [showRaw]);
+  const [missing, setMissing] = React.useState(0);
+  React.useEffect(() => { setRaw(value); if (ref.current && !showRaw) { ref.current.innerHTML = value; markUnresolved(ref.current); } }, [value]);
+  React.useEffect(() => { if (ref.current && !showRaw) { ref.current.innerHTML = raw; markUnresolved(ref.current); } }, [showRaw]);
 
-  const inlineImages = async (root: HTMLElement) => {
+  const blobToDataUrl = (b: Blob): Promise<string> =>
+    new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result));
+      fr.onerror = () => rej(fr.error);
+      fr.readAsDataURL(b);
+    });
+
+  const markUnresolved = (root: HTMLElement) => {
+    let n = 0;
+    for (const img of Array.from(root.querySelectorAll<HTMLImageElement>('img'))) {
+      const src = img.getAttribute('src') ?? '';
+      if (src.startsWith('data:')) img.removeAttribute('data-sig-unresolved');
+      else { img.setAttribute('data-sig-unresolved', ''); n++; }
+    }
+    setMissing(n);
+  };
+
+  const serialize = (root: HTMLElement) => {
+    const clone = root.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll('[data-sig-unresolved]').forEach((el) => el.removeAttribute('data-sig-unresolved'));
+    return clone.innerHTML.trim();
+  };
+
+  const resolveImages = async (root: HTMLElement, clipboardImages: string[]) => {
     const imgs = Array.from(root.querySelectorAll<HTMLImageElement>('img'));
+    let ci = 0;
     await Promise.all(
       imgs.map(async (img) => {
         const src = img.getAttribute('src') ?? '';
-        if (!/^https?:/i.test(src)) return;
+        if (src.startsWith('data:')) return;
+        // Office-origin HTML references images via file:///…/clip_imageNNN, cid:, or
+        // auth-gated attachment URLs — the real bitmaps ride alongside in
+        // clipboardData.items. Consume those in document order.
+        if (!/^https?:/i.test(src)) {
+          const d = clipboardImages[ci++];
+          if (d) img.setAttribute('src', d);
+          return;
+        }
         try {
           const r = await fetch(src);
-          if (!r.ok) return;
-          const b = await r.blob();
-          const dataUrl: string = await new Promise((res, rej) => {
-            const fr = new FileReader();
-            fr.onload = () => res(String(fr.result));
-            fr.onerror = () => rej(fr.error);
-            fr.readAsDataURL(b);
-          });
-          img.setAttribute('src', dataUrl);
-        } catch { /* leave remote src */ }
+          if (!r.ok) throw new Error(String(r.status));
+          img.setAttribute('src', await blobToDataUrl(await r.blob()));
+        } catch {
+          const d = clipboardImages[ci++];
+          if (d) img.setAttribute('src', d);
+        }
       }),
     );
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const cd = e.clipboardData;
+    const html = cd.getData('text/html');
+    const text = cd.getData('text/plain');
+    const imageFiles: File[] = [];
+    for (const item of Array.from(cd.items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const f = item.getAsFile();
+        if (f) imageFiles.push(f);
+      }
+    }
+    if (!html && !text && !imageFiles.length) return;
+    e.preventDefault();
+    const clipboardImages = await Promise.all(imageFiles.map(blobToDataUrl));
+    const el = ref.current;
+    if (!el) return;
+    const content = html
+      ? html.replace(/<!--\[if[\s\S]*?endif\]-->/gi, '').replace(/<\/?o:p[^>]*>/gi, '')
+      : text
+        ? text.replace(/\n/g, '<br>')
+        : `<img src="${clipboardImages[0]}">`;
+    const isEmpty = !el.textContent?.trim() && !el.querySelector('img,table');
+    if (isEmpty) el.innerHTML = content;
+    else document.execCommand('insertHTML', false, content);
+    trimEmptyEdges(el);
+    await resolveImages(el, clipboardImages);
+    markUnresolved(el);
+    const out = serialize(el);
+    setRaw(out);
+    onChange(out);
+  };
+
+  const trimEmptyEdges = (root: HTMLElement) => {
+    const noText = (n: Node) => !(n.textContent ?? '').replace(/[\s ​]/g, '');
+    const isBlank = (n: ChildNode) =>
+      (n.nodeType === Node.TEXT_NODE && noText(n)) ||
+      (n.nodeType === Node.ELEMENT_NODE && /^(P|DIV|BR|SPAN|HEAD|META)$/.test((n as Element).tagName)
+        && noText(n) && !(n as Element).querySelector('img,table,hr'));
+    while (root.firstChild && isBlank(root.firstChild)) root.removeChild(root.firstChild);
+    while (root.lastChild && isBlank(root.lastChild)) root.removeChild(root.lastChild);
+  };
+
+  const applyFileToImg = async (img: HTMLImageElement, file: File) => {
+    img.setAttribute('src', await blobToDataUrl(file));
+    img.removeAttribute('data-sig-unresolved');
+    if (!img.getAttribute('alt')) img.setAttribute('alt', file.name);
+    const el = ref.current; if (!el) return;
+    markUnresolved(el);
+    const out = serialize(el);
+    setRaw(out); onChange(out);
+  };
+
+  const fillUnresolved = async (files: File[]) => {
+    const el = ref.current; if (!el || !files.length) return;
+    const targets = Array.from(el.querySelectorAll<HTMLImageElement>('img[data-sig-unresolved]'));
+    for (let i = 0; i < files.length; i++) {
+      const img = targets[i];
+      const url = await blobToDataUrl(files[i]);
+      if (img) { img.setAttribute('src', url); img.removeAttribute('data-sig-unresolved'); }
+      else el.insertAdjacentHTML('beforeend', `<img src="${url}" alt="${files[i].name}">`);
+    }
+    markUnresolved(el);
+    const out = serialize(el);
+    setRaw(out); onChange(out);
   };
 
   const commit = async () => {
     const el = ref.current;
     if (!el) return;
-    await inlineImages(el);
-    const html = el.innerHTML.trim();
+    await resolveImages(el, []);
+    markUnresolved(el);
+    const html = serialize(el);
     setRaw(html);
     onChange(html);
   };
 
   return (
     <div className="rounded-lg border border-border overflow-hidden">
+      <style>{SIG_EDITOR_CSS}</style>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []).filter((f) => f.type.startsWith('image/'));
+          if (targetImgRef.current && files[0]) void applyFileToImg(targetImgRef.current, files[0]);
+          else void fillUnresolved(files);
+          targetImgRef.current = null;
+          e.target.value = '';
+        }}
+      />
       <div className="flex items-center justify-between px-2 py-1 border-b border-border bg-muted/30">
         <span className="text-[10px] text-muted-foreground">
-          {showRaw ? 'Raw HTML' : 'Paste your signature here — formatting & images are kept'}
+          {showRaw
+            ? 'Raw HTML'
+            : missing > 0
+              ? `${missing} image${missing === 1 ? '' : 's'} missing — click a dashed box (or drop a file on it) to set the image`
+              : 'Paste your signature here — formatting is kept'}
         </span>
         <div className="flex gap-1">
           <button
@@ -114,15 +244,31 @@ function SignatureEditor({ value, onChange }: { value: string; onChange: (html: 
           contentEditable
           suppressContentEditableWarning
           onBlur={() => void commit()}
-          onPaste={(e) => {
-            const html = e.clipboardData.getData('text/html');
-            const text = e.clipboardData.getData('text/plain');
-            if (!html && !text) return;
-            e.preventDefault();
-            document.execCommand('insertHTML', false, html || text.replace(/\n/g, '<br>'));
+          onPaste={(e) => void handlePaste(e)}
+          onClick={(e) => {
+            const t = e.target as HTMLElement;
+            if (t.tagName === 'IMG' && t.hasAttribute('data-sig-unresolved')) {
+              e.preventDefault();
+              targetImgRef.current = t as HTMLImageElement;
+              fileRef.current?.click();
+            }
           }}
-          style={{ minHeight: 90, maxHeight: 260, overflowY: 'auto', background: '#fff', color: '#1f2937', colorScheme: 'light' }}
-          className="px-3 py-2 text-[12px] focus:outline-none"
+          onDragOver={(e) => { if (Array.from(e.dataTransfer.types).includes('Files')) e.preventDefault(); }}
+          onDrop={(e) => {
+            const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+            if (!files.length) return;
+            e.preventDefault();
+            const t = e.target as HTMLElement;
+            const img = t.tagName === 'IMG' ? (t as HTMLImageElement) : t.closest('img');
+            if (img) void applyFileToImg(img as HTMLImageElement, files[0]);
+            else void fillUnresolved(files);
+          }}
+          style={{
+            minHeight: 90, maxHeight: 280, overflowY: 'auto',
+            background: '#fff', color: '#1f2937', colorScheme: 'light',
+            fontFamily: 'Calibri, Arial, sans-serif', fontSize: 14.7, lineHeight: 'normal',
+          }}
+          className="msg-sig-editor px-3 py-2 focus:outline-none"
         />
       )}
     </div>

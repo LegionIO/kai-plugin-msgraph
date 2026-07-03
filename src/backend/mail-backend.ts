@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { GraphClient } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
 import * as photoCache from './photo-cache.js';
@@ -7,7 +8,7 @@ import * as mediaServer from './media-server.js';
 import { getLogger } from './logger-singleton.js';
 import {
   MAIL_NAV_ID, MAIL_PANEL_ID, MAIL_DELTA_POLL_SECONDS, WELL_KNOWN_FOLDERS,
-  CLIENT_ID_OFFICE, OUTLOOK_SCOPE, OUTLOOK_CLOUD_SETTINGS_URL, OUTLOOK_ROAMING_SIG_URL,
+  CLIENT_ID_OFFICE, OUTLOOK_SCOPE, OUTLOOK_CLOUD_SETTINGS_URL, OUTLOOK_ROAMING_SIG_URL, OWA_SERVICE_URL,
 } from '../shared/constants.js';
 import type {
   PluginAPI,
@@ -399,15 +400,58 @@ async function outlookHeaders(api: PluginAPI): Promise<Record<string, string>> {
   };
 }
 
+type OwaResponseItem = { ResponseCode?: string; ResponseClass?: string; MessageText?: string };
+
+async function owaAction(api: PluginAPI, action: string, body: Record<string, unknown>): Promise<void> {
+  const H = await outlookHeaders(api);
+  const payload = {
+    __type: `${action}JsonRequest:#Exchange`,
+    Header: { __type: 'JsonRequestHeaders:#Exchange', RequestServerVersion: 'V2018_01_08' },
+    Body: { __type: `${action}Request:#Exchange`, ...body },
+  };
+  const resp = await fetch(`${OWA_SERVICE_URL}?action=${action}&app=Mail`, {
+    method: 'POST',
+    headers: {
+      ...H,
+      action,
+      'content-type': 'application/json; charset=utf-8',
+      'x-req-source': 'Mail',
+      'x-owa-correlationid': randomUUID(),
+      'x-owa-urlpostdata': encodeURIComponent(JSON.stringify(payload)),
+      // Graph mailFolder ids are immutable-format; this makes OWA accept them as FolderId:#Exchange.
+      prefer: 'IdType="ImmutableId"',
+    },
+  });
+  if (!resp.ok) throw new Error(`OWA ${action} → ${resp.status} ${(await resp.text()).slice(0, 200)}`);
+  const j = (await resp.json()) as { Body?: { ResponseMessages?: { Items?: OwaResponseItem[] } } };
+  const item = j.Body?.ResponseMessages?.Items?.[0];
+  if (item?.ResponseClass && item.ResponseClass !== 'Success') {
+    throw new Error(`OWA ${action} → ${item.ResponseCode}: ${item.MessageText ?? item.ResponseClass}`);
+  }
+}
+
+const owaFolderId = (id: string) => ({ __type: 'FolderId:#Exchange', Id: id });
+
+function setSignatureIfChanged(api: PluginAPI, next: MailSignature | null): void {
+  const cur = st(api).mailSignature ?? null;
+  if (cur === next) return;
+  if (cur && next
+    && cur.html === next.html
+    && cur.autoAddOnNew === next.autoAddOnNew
+    && cur.autoAddOnReply === next.autoAddOnReply
+    && cur.source === next.source) return;
+  api.state.set('mailSignature', next);
+}
+
 export async function loadSignature(api: PluginAPI): Promise<void> {
   const p = prefs(api);
   if (p.mailSignatureHtml?.trim()) {
-    api.state.set('mailSignature', {
+    setSignatureIfChanged(api, {
       html: p.mailSignatureHtml,
       autoAddOnNew: p.mailSignatureAutoNew ?? true,
       autoAddOnReply: p.mailSignatureAutoReply ?? true,
       source: 'config',
-    } satisfies MailSignature);
+    });
     return;
   }
   try {
@@ -438,14 +482,15 @@ export async function loadSignature(api: PluginAPI): Promise<void> {
       }
     }
     if (html?.trim()) {
-      api.state.set('mailSignature', {
+      setSignatureIfChanged(api, {
         html,
         autoAddOnNew: true,
         autoAddOnReply: usesRoaming ? !!replyName : true,
         source: 'owa',
-      } satisfies MailSignature);
+      });
       getLogger().info(`mail-signature: loaded from Outlook (${usesRoaming ? 'roaming' : 'legacy'})`);
     } else {
+      setSignatureIfChanged(api, null);
       getLogger().info('mail-signature: no signature configured in Outlook; use plugin Settings to set one.');
     }
   } catch (err) {
@@ -532,9 +577,21 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
       }
       case 'mark-folder-read': {
         const { folderId } = data as { folderId: string };
-        const client = await ensureAuthenticated(false);
-        const n = await client.markFolderRead(folderId);
-        log.info(`mark-folder-read(${folderId}): ${n} messages`);
+        const realId = (st(api).mailFolders ?? []).find((f) => f.wellKnownName === folderId)?.id ?? folderId;
+        try {
+          await owaAction(api, 'MarkAllItemsAsRead', {
+            ReadFlag: true,
+            SuppressReadReceipts: true,
+            FolderIds: [owaFolderId(realId)],
+            ItemIdsToExclude: [],
+          });
+          log.info(`mark-folder-read(${folderId}): OWA bulk`);
+        } catch (e) {
+          log.warn(`OWA MarkAllItemsAsRead failed, falling back to Graph batch: ${(e as Error).message}`);
+          const client = await ensureAuthenticated(false);
+          const n = await client.markFolderRead(folderId);
+          log.info(`mark-folder-read(${folderId}): ${n} messages via Graph`);
+        }
         const cur = st(api).mailFolders ?? [];
         api.state.set('mailFolders', cur.map((f) =>
           f.id === folderId || f.wellKnownName === folderId ? { ...f, unreadItemCount: 0 } : f,
@@ -549,9 +606,25 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
         const { folderId } = data as { folderId: string };
         const folder = (st(api).mailFolders ?? []).find((f) => f.id === folderId || f.wellKnownName === folderId);
         const hardDelete = folder?.wellKnownName === 'deleteditems' || folder?.wellKnownName === 'junkemail';
-        const client = await ensureAuthenticated(false);
-        const n = await client.emptyFolder(folderId, hardDelete);
-        log.info(`empty-folder(${folderId}): ${n} messages ${hardDelete ? 'deleted' : 'moved to Deleted Items'}`);
+        const realId = folder?.id ?? folderId;
+        try {
+          await owaAction(api, 'EmptyFolder', {
+            FolderIds: [owaFolderId(realId)],
+            DeleteType: hardDelete ? 'HardDelete' : 'MoveToDeletedItems',
+            DeleteSubFolders: false,
+            AllowSearchFolder: true,
+            SuppressReadReceipt: true,
+            ItemIdsToExclude: [],
+            BulkActionRequest: true,
+            BulkActionBatchSize: 200,
+          });
+          log.info(`empty-folder(${folderId}): OWA bulk (${hardDelete ? 'HardDelete' : 'MoveToDeletedItems'})`);
+        } catch (e) {
+          log.warn(`OWA EmptyFolder failed, falling back to Graph batch: ${(e as Error).message}`);
+          const client = await ensureAuthenticated(false);
+          const n = await client.emptyFolder(folderId, hardDelete);
+          log.info(`empty-folder(${folderId}): ${n} messages ${hardDelete ? 'deleted' : 'moved to Deleted Items'} via Graph`);
+        }
         await loadMailFolders(api);
         if (st(api).activeMailFolder === folderId || st(api).activeMailFolder === folder?.wellKnownName) {
           await loadMailList(api, st(api).activeMailFolder ?? folderId);

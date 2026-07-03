@@ -1,28 +1,32 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { MsgraphPluginState } from '../../shared/types.ts';
-import type { PendingImage } from '../../shared/markdown.ts';
+import type { MsgraphPluginState, Presence } from '../../shared/types.ts';
 import { Avatar } from './Avatar.tsx';
+import { RichComposer } from '../editor/RichComposer.tsx';
+import type { SerializedPayload } from '../editor/serialize.ts';
 
 type Person = { id: string; displayName: string; email: string | null };
+
+const noop = () => {};
 
 export function NewChatDialog({
   state,
   photos,
+  presence,
   onAction,
   onClose,
 }: {
   state: MsgraphPluginState;
   photos: Record<string, string | null>;
+  presence: Record<string, Presence>;
   onAction: (action: string, data?: unknown) => void;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState('');
   const [recipients, setRecipients] = useState<Person[]>([]);
+  const recipientsRef = useRef(recipients);
+  useEffect(() => { recipientsRef.current = recipients; }, [recipients]);
   const [topic, setTopic] = useState('');
-  const [text, setText] = useState('');
-  const [images, setImages] = useState<PendingImage[]>([]);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   const search = state.peopleSearch;
   const suggestions = (search?.query === query.trim() ? search.results : []).filter(
@@ -43,25 +47,13 @@ export function NewChatDialog({
   };
   const remove = (id: string) => setRecipients((r) => r.filter((x) => x.id !== id));
 
-  const attach = async (files: FileList | null) => {
-    if (!files) return;
-    const next: PendingImage[] = [];
-    for (const f of Array.from(files)) {
-      if (!f.type.startsWith('image/')) continue;
-      const b64 = await fileToBase64(f);
-      next.push({ id: crypto.randomUUID?.() ?? String(Date.now() + Math.random()), contentType: f.type, contentBytes: b64, name: f.name });
-    }
-    setImages((i) => [...i, ...next]);
-  };
-
-  const canSend = recipients.length > 0;
-  const submit = () => {
-    if (!canSend) return;
+  const submit = (payload?: SerializedPayload) => {
+    const rs = recipientsRef.current;
+    if (rs.length === 0) return;
     onAction('compose-new-chat', {
-      recipients,
-      topic: recipients.length > 1 ? topic.trim() || undefined : undefined,
-      text: text.trim() || undefined,
-      images: images.length ? images : undefined,
+      recipients: rs,
+      topic: rs.length > 1 ? topic.trim() || undefined : undefined,
+      payload,
     });
     onClose();
   };
@@ -69,7 +61,7 @@ export function NewChatDialog({
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onMouseDown={onClose}>
       <div
-        style={{ width: 460, maxWidth: 'calc(100% - 2rem)' }}
+        style={{ width: 520, maxWidth: 'calc(100% - 2rem)' }}
         className="bg-card rounded-xl shadow-2xl border border-border p-4"
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -131,68 +123,43 @@ export function NewChatDialog({
           />
         )}
 
-        <textarea
-          className="mt-3 w-full resize-none px-3 py-2 text-sm bg-muted border border-border rounded-lg text-foreground placeholder:text-muted-foreground focus:border-primary transition-colors"
-          rows={3}
-          placeholder="First message (optional) — supports **bold**, *italic*, `code`, ```blocks```"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-        />
+        <div className="mt-3">
+          <RichComposer
+            chatId="__new-chat__"
+            bare
+            placeholder="First message (optional)"
+            sending={false}
+            disabled={recipients.length === 0}
+            replyTo={null}
+            editing={null}
+            hostedContents={state.hostedContents ?? {}}
+            onClearReply={noop}
+            onCancelEdit={noop}
+            onSaveEdit={noop}
+            onSend={submit}
+            onSearchPeople={(q) => onAction('search-people', { query: q })}
+            peopleSearch={state.peopleSearch ?? null}
+            photos={photos}
+            presence={presence}
+          />
+        </div>
 
-        {images.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {images.map((img) => (
-              <div key={img.id} className="relative">
-                <img
-                  src={`data:${img.contentType};base64,${img.contentBytes}`}
-                  alt={img.name}
-                  style={{ width: 56, height: 56 }}
-                  className="rounded-md object-cover border border-border"
-                />
-                <button
-                  type="button"
-                  onClick={() => setImages((i) => i.filter((x) => x.id !== img.id))}
-                  style={{ width: 16, height: 16 }}
-                  className="absolute -top-1 -right-1 rounded-full bg-card border border-border text-[10px] leading-none flex items-center justify-center text-muted-foreground hover:text-foreground"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="mt-3 flex items-center justify-between">
-          <div>
-            <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={(e) => attach(e.target.files)} />
-            <button
-              type="button"
-              onClick={() => fileRef.current?.click()}
-              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-              title="Attach image"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-5-5L5 21" />
-              </svg>
-            </button>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3 py-1.5 text-xs font-medium text-muted-foreground bg-muted border border-border rounded-lg hover:bg-muted/80 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!canSend}
-              className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
-            >
-              {recipients.length > 1 ? 'Create' : text.trim() || images.length ? 'Send' : 'Open'}
-            </button>
-          </div>
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs font-medium text-muted-foreground bg-muted border border-border rounded-lg hover:bg-muted/80 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => submit()}
+            disabled={recipients.length === 0}
+            className="px-3 py-1.5 text-xs font-medium text-foreground border border-border rounded-lg hover:bg-muted disabled:opacity-50 transition-colors"
+          >
+            {recipients.length > 1 ? 'Create without message' : 'Open chat'}
+          </button>
         </div>
       </div>
     </div>

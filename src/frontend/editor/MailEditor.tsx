@@ -48,8 +48,8 @@ export interface MailEditorHandle {
   focus: () => void;
 }
 
-export const MailEditor = forwardRef<MailEditorHandle, { placeholder?: string; minHeight?: number }>(
-  function MailEditor({ placeholder = 'Write your message…', minHeight = 180 }, ref) {
+export const MailEditor = forwardRef<MailEditorHandle, { placeholder?: string; minHeight?: number; frameless?: boolean }>(
+  function MailEditor({ placeholder = 'Write your message…', minHeight = 180, frameless = false }, ref) {
     useEffect(ensureSyntaxThemeInjected, []);
     const initialConfig: InitialConfigType = {
       namespace: 'msgraph-mail-composer',
@@ -59,14 +59,14 @@ export const MailEditor = forwardRef<MailEditorHandle, { placeholder?: string; m
     };
     return (
       <LexicalComposer initialConfig={initialConfig}>
-        <MailEditorInner ref={ref} placeholder={placeholder} minHeight={minHeight} />
+        <MailEditorInner ref={ref} placeholder={placeholder} minHeight={minHeight} frameless={frameless} />
       </LexicalComposer>
     );
   },
 );
 
-const MailEditorInner = forwardRef<MailEditorHandle, { placeholder: string; minHeight: number }>(
-  function MailEditorInner({ placeholder, minHeight }, ref) {
+const MailEditorInner = forwardRef<MailEditorHandle, { placeholder: string; minHeight: number; frameless: boolean }>(
+  function MailEditorInner({ placeholder, minHeight, frameless }, ref) {
     const [editor] = useLexicalComposerContext();
     const [formats, setFormats] = useState<Set<TextFormatType>>(new Set());
     const attachRef = useRef<HTMLInputElement>(null);
@@ -162,8 +162,11 @@ const MailEditorInner = forwardRef<MailEditorHandle, { placeholder: string; minH
     const toggleFmt = (f: TextFormatType) => editor.dispatchCommand(FORMAT_TEXT_COMMAND, f);
 
     return (
-      <div className="rounded-lg border border-border bg-background focus-within:border-primary transition-colors">
-        <div className="flex items-center gap-0.5 border-b border-border/60 px-1.5 py-1">
+      <div className={frameless ? undefined : 'rounded-lg border border-border bg-background focus-within:border-primary transition-colors'}>
+        <div
+          className="flex items-center gap-0.5 border-b border-border/60 px-1.5 py-1"
+          style={frameless ? { color: '#4b5563' } : undefined}
+        >
           <ToolbarBtn active={fmtActive('bold')} onClick={() => toggleFmt('bold')} title="Bold (⌘B)"><b>B</b></ToolbarBtn>
           <ToolbarBtn active={fmtActive('italic')} onClick={() => toggleFmt('italic')} title="Italic (⌘I)"><i>I</i></ToolbarBtn>
           <ToolbarBtn active={fmtActive('underline')} onClick={() => toggleFmt('underline')} title="Underline (⌘U)"><u>U</u></ToolbarBtn>
@@ -197,8 +200,8 @@ const MailEditorInner = forwardRef<MailEditorHandle, { placeholder: string; minH
           <RichTextPlugin
             contentEditable={
               <ContentEditable
-                className="text-sm text-foreground outline-none px-3 py-2.5"
-                style={{ minHeight, maxHeight: 380, overflowY: 'auto' }}
+                className={frameless ? 'text-sm outline-none px-3 py-2.5' : 'text-sm text-foreground outline-none px-3 py-2.5'}
+                style={{ minHeight, maxHeight: 380, overflowY: 'auto', ...(frameless ? { color: '#1f2937' } : null) }}
                 aria-placeholder={placeholder}
                 placeholder={
                   <div style={{ position: 'absolute', top: 10, left: 12, pointerEvents: 'none' }} className="text-sm text-muted-foreground">

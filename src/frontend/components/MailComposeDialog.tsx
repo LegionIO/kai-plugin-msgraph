@@ -1,7 +1,44 @@
-import React, { useRef, useState } from 'react';
+import React, { memo, useMemo, useRef, useState } from 'react';
 import type { MailAddress, MailComposeState, MsgraphPluginState, OutgoingMail } from '../../shared/types.ts';
 import { fileToBase64 } from './NewChatDialog.tsx';
 import { MailEditor, type MailEditorHandle } from '../editor/MailEditor.tsx';
+
+const SIG_PLACEHOLDER =
+  "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='3' width='18' height='18' rx='2'/><circle cx='9' cy='9' r='2'/><path d='m21 15-5-5L5 21'/></svg>";
+const composeSheetStyle: React.CSSProperties = { background: '#fff', color: '#1f2937', colorScheme: 'light', overflow: 'hidden' };
+const sigWrapStyle: React.CSSProperties = { fontFamily: 'Calibri, Arial, sans-serif', fontSize: 14.7, lineHeight: 'normal' };
+const sigRemoveBtnStyle: React.CSSProperties = { background: '#f3f4f6', color: '#4b5563', border: '1px solid #d1d5db', borderRadius: 6, padding: '1px 5px', fontSize: 11, lineHeight: '14px' };
+
+const SignaturePreview = memo(function SignaturePreview({ html, onRemove }: { html: string; onRemove: () => void }) {
+  const { safe, missing } = useMemo(() => {
+    let n = 0;
+    const out = html.replace(/(<img\b[^>]*?\bsrc=)(["'])(.*?)\2/gi, (m, pre, q, src) => {
+      if (/^(data:|https?:)/i.test(src)) return m;
+      n++;
+      return `${pre}${q}${SIG_PLACEHOLDER}${q} data-sig-missing=""`;
+    });
+    return { safe: out, missing: n };
+  }, [html]);
+  return (
+    <div className="relative group px-3 pb-3" style={sigWrapStyle}>
+      <button
+        type="button"
+        onClick={onRemove}
+        title="Remove signature from this message"
+        className="absolute -top-1 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
+        style={sigRemoveBtnStyle}
+      >
+        × signature
+      </button>
+      <div dangerouslySetInnerHTML={{ __html: safe }} />
+      {missing > 0 && (
+        <div style={{ fontSize: 10, color: '#b45309', marginTop: 6 }}>
+          {missing} signature image{missing === 1 ? '' : 's'} not set — fill {missing === 1 ? 'it' : 'them'} in Settings → Mail signature
+        </div>
+      )}
+    </div>
+  );
+});
 
 export function MailComposeDialog({
   compose,
@@ -22,6 +59,7 @@ export function MailComposeDialog({
   const [includeSig, setIncludeSig] = useState(!!compose.signatureHtml);
   const fileRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<MailEditorHandle>(null);
+  const removeSig = useRef(() => setIncludeSig(false)).current;
 
   const canSend = !sending && subject.trim().length > 0 && (to.length > 0 || compose.mode === 'reply' || compose.mode === 'replyAll');
 
@@ -120,7 +158,12 @@ export function MailComposeDialog({
               className="flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
             />
           </div>
-          <MailEditor ref={editorRef} minHeight={200} />
+          <div className="rounded-lg border border-border" style={composeSheetStyle}>
+            <MailEditor ref={editorRef} minHeight={includeSig && compose.signatureHtml ? 140 : 200} frameless />
+            {includeSig && compose.signatureHtml && (
+              <SignaturePreview html={compose.signatureHtml} onRemove={removeSig} />
+            )}
+          </div>
           {files.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {files.map((f, i) => (
@@ -137,12 +180,6 @@ export function MailComposeDialog({
                 </span>
               ))}
             </div>
-          )}
-          {compose.signatureHtml && (
-            <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer">
-              <input type="checkbox" checked={includeSig} onChange={(e) => setIncludeSig(e.target.checked)} className="w-3 h-3" />
-              Append signature
-            </label>
           )}
           {compose.quotedHtml && (
             <details className="text-[11px] text-muted-foreground">

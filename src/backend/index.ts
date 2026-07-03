@@ -840,11 +840,12 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         break;
       }
       case 'compose-new-chat': {
-        const { recipients, topic, text, images } = data as {
+        const { recipients, topic, text, images, payload } = data as {
           recipients: Array<{ id: string; displayName?: string }>;
           topic?: string;
           text?: string;
           images?: PendingImage[];
+          payload?: { body: { contentType: 'text' | 'html'; content: string } };
         };
         const client = await ensureAuthenticated(api);
         const myId = tokenCache.getObjectId();
@@ -873,10 +874,8 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           }
         }
 
-        if ((text && text.trim()) || (images && images.length)) {
-          const payload = buildMessageBody(text ?? '', images ?? []);
-          await client.sendMessageRaw(chatId, payload);
-        }
+        const body = payload ?? ((text?.trim() || images?.length) ? buildMessageBody(text ?? '', images ?? []) : null);
+        if (body) await client.sendMessageRaw(chatId, body);
         await loadChats(api, false);
         await loadMessages(api, chatId);
         break;

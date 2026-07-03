@@ -87,6 +87,9 @@ export const MD_TRANSFORMERS = [
 export interface RichComposerProps {
   chatId: string;
   sending: boolean;
+  disabled?: boolean;
+  placeholder?: string;
+  bare?: boolean;
   replyTo: MsgraphPluginState['composerReplyTo'];
   editing: MsgraphPluginState['composerEditing'];
   hostedContents: Record<string, string | null>;
@@ -137,6 +140,9 @@ export function RichComposer(props: RichComposerProps) {
 function ComposerInner({
   chatId,
   sending,
+  disabled = false,
+  placeholder = 'Message…',
+  bare = false,
   replyTo,
   editing,
   hostedContents,
@@ -323,7 +329,7 @@ function ComposerInner({
   const toggleFmt = (f: TextFormatType) => editor.dispatchCommand(FORMAT_TEXT_COMMAND, f);
 
   return (
-    <div className="border-t border-border/50 p-3 shrink-0">
+    <div className={bare ? undefined : 'border-t border-border/50 p-3 shrink-0'}>
       {editing && (
         <div className="mb-2 flex items-center gap-2 rounded-lg border-l-2 border-amber-500 bg-muted/50 pl-2 pr-1.5 py-1.5">
           <div className="min-w-0 flex-1 text-[11px] text-foreground/80">
@@ -364,13 +370,13 @@ function ComposerInner({
               <ContentEditable
                 className="text-sm text-foreground outline-none px-3 py-2"
                 style={{ minHeight: 36, maxHeight: 200, overflowY: 'auto' }}
-                aria-placeholder="Message…"
+                aria-placeholder={placeholder}
                 placeholder={
                   <div
                     style={{ position: 'absolute', top: 8, left: 12, pointerEvents: 'none' }}
                     className="text-sm text-muted-foreground"
                   >
-                    Message…
+                    {placeholder}
                   </div>
                 }
               />
@@ -463,7 +469,7 @@ function ComposerInner({
           </div>
           <button
             type="button"
-            disabled={isEmpty || sending}
+            disabled={disabled || isEmpty || sending}
             onClick={send}
             className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
           >
