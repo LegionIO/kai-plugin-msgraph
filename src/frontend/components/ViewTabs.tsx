@@ -1,48 +1,93 @@
 import React from 'react';
 
-export function ViewTabs({
+export function ViewRail({
   active,
-  onNavigate,
   chatUnread,
   mailUnread,
 }: {
   active: 'teams' | 'mail';
-  onNavigate: (view: 'teams' | 'mail') => void;
   chatUnread: number;
   mailUnread: number;
 }) {
+  const go = (view: 'teams' | 'mail') => {
+    if (view === active) return;
+    // Renderer-side navigation (App.tsx listens for this custom event) — avoids
+    // a backend round-trip and works regardless of which panel's action handler
+    // the click would otherwise route through.
+    window.dispatchEvent(
+      new CustomEvent('plugin-navigate', {
+        detail: {
+          pluginName: 'msgraph',
+          target: { type: 'panel', panelId: view === 'mail' ? 'outlook-panel' : 'teams-panel' },
+        },
+      }),
+    );
+  };
   return (
-    <div className="inline-flex items-center rounded-lg border border-border bg-muted/40 p-0.5">
-      <Tab
+    <div
+      className="flex flex-col items-center gap-1 border-r border-border/50 bg-muted/20 py-2 shrink-0"
+      style={{ width: 48 }}
+    >
+      <RailBtn
         active={active === 'teams'}
-        label="Teams"
+        title="Teams"
         badge={chatUnread}
-        onClick={() => active !== 'teams' && onNavigate('teams')}
-      />
-      <Tab
+        onClick={() => go('teams')}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          <path d="M8 10h.01M12 10h.01M16 10h.01" />
+        </svg>
+      </RailBtn>
+      <RailBtn
         active={active === 'mail'}
-        label="Outlook"
+        title="Outlook"
         badge={mailUnread}
-        onClick={() => active !== 'mail' && onNavigate('mail')}
-      />
+        onClick={() => go('mail')}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2" />
+          <path d="m2 7 10 6 10-6" />
+        </svg>
+      </RailBtn>
     </div>
   );
 }
 
-function Tab({ active, label, badge, onClick }: { active: boolean; label: string; badge: number; onClick: () => void }) {
+function RailBtn({
+  active,
+  title,
+  badge,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  title: string;
+  badge: number;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
   return (
     <button
       type="button"
+      title={title}
       onClick={onClick}
-      className={`px-3 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 ${
-        active ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+      style={{ width: 36, height: 36, position: 'relative' }}
+      className={`flex items-center justify-center rounded-lg transition-colors ${
+        active
+          ? 'bg-primary/15 text-primary'
+          : 'text-muted-foreground hover:text-foreground hover:bg-muted'
       }`}
     >
-      {label}
+      <span className="block w-5 h-5 [&>svg]:w-5 [&>svg]:h-5">{children}</span>
       {badge > 0 && (
         <span
-          style={{ minWidth: 16, height: 14, fontSize: 9, lineHeight: '14px' }}
-          className="rounded-full bg-primary text-primary-foreground text-center px-1"
+          style={{
+            position: 'absolute', top: -2, right: -2,
+            minWidth: 15, height: 15, fontSize: 8.5, lineHeight: '15px',
+            borderRadius: '999px', padding: '0 3px',
+          }}
+          className="bg-primary text-primary-foreground text-center font-semibold"
         >
           {badge > 99 ? '99+' : badge}
         </span>
