@@ -5,6 +5,7 @@ import type { MsgraphPluginState, NormalizedMailSummary, MailFolder } from '../.
 import { MailBody } from './MailBody.tsx';
 import { MailComposeDialog } from './MailComposeDialog.tsx';
 import { Avatar } from './Avatar.tsx';
+import { ViewTabs } from './ViewTabs.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
@@ -87,7 +88,12 @@ export function MailPanelView({ pluginState, onAction }: Props) {
       {/* Top bar */}
       <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2 shrink-0">
         <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold">Outlook</h2>
+          <ViewTabs
+            active="mail"
+            onNavigate={(v) => onAction('navigate-panel', { view: v })}
+            chatUnread={(s.chats ?? []).reduce((n, c) => n + (c.unread ? 1 : 0), 0)}
+            mailUnread={(s.mailFolders ?? []).find((f) => f.wellKnownName === 'inbox')?.unreadItemCount ?? 0}
+          />
           <button
             type="button"
             title="New mail"
@@ -133,14 +139,16 @@ export function MailPanelView({ pluginState, onAction }: Props) {
 
       <div className="flex flex-1 min-h-0">
         {/* Folder sidebar */}
-        <div className="flex flex-col border-r border-border/50 min-h-0 shrink-0" style={{ width: 170 }}>
+        <div className="flex flex-col border-r border-border/50 min-h-0 shrink-0" style={{ width: 190 }}>
           <div className="flex-1 overflow-y-auto py-2">
             {folders.map((f) => (
               <FolderRow
                 key={f.id}
                 f={f}
                 active={!searching && (activeFolder === f.id || activeFolder === f.wellKnownName)}
+                expanded={(s.mailFoldersExpanded ?? []).includes(f.id)}
                 onClick={() => { setSearch(''); onAction('select-folder', { folderId: f.wellKnownName ?? f.id }); }}
+                onToggle={() => onAction('toggle-folder', { folderId: f.id })}
               />
             ))}
             {s.loadingMailFolders && folders.length === 0 && (
@@ -216,16 +224,50 @@ export function MailPanelView({ pluginState, onAction }: Props) {
   );
 }
 
-function FolderRow({ f, active, onClick }: { f: MailFolder; active: boolean; onClick: () => void }) {
+function FolderRow({
+  f,
+  active,
+  expanded,
+  onClick,
+  onToggle,
+}: {
+  f: MailFolder;
+  active: boolean;
+  expanded: boolean;
+  onClick: () => void;
+  onToggle: () => void;
+}) {
   const icon = f.wellKnownName ? FOLDER_ICON[f.wellKnownName] : undefined;
+  const hasChildren = f.childFolderCount > 0;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+    <div
+      className={`w-full flex items-center gap-1 pr-2 py-1.5 text-left text-xs transition-colors cursor-pointer ${
         active ? 'bg-primary/15 text-foreground font-medium' : 'text-foreground/80 hover:bg-muted'
       }`}
+      style={{ paddingLeft: 6 + f.depth * 14 }}
+      onClick={onClick}
     >
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); if (hasChildren) onToggle(); }}
+        className={`w-4 h-4 flex items-center justify-center shrink-0 rounded ${
+          hasChildren ? 'text-muted-foreground hover:text-foreground hover:bg-muted' : 'invisible'
+        }`}
+        aria-label={expanded ? 'Collapse' : 'Expand'}
+      >
+        <svg
+          className="w-3 h-3"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ transform: expanded ? 'rotate(90deg)' : undefined, transition: 'transform 120ms' }}
+        >
+          <path d="m9 18 6-6-6-6" />
+        </svg>
+      </button>
       <span className="w-4 text-center shrink-0">{icon ?? '📁'}</span>
       <span className="flex-1 truncate">{f.displayName}</span>
       {f.unreadItemCount > 0 && (
@@ -233,10 +275,10 @@ function FolderRow({ f, active, onClick }: { f: MailFolder; active: boolean; onC
           style={{ minWidth: 18, height: 16, fontSize: 9, lineHeight: '16px' }}
           className="rounded-full bg-primary text-primary-foreground text-center px-1 font-semibold"
         >
-          {f.unreadItemCount > 99 ? '99+' : f.unreadItemCount}
+          {f.unreadItemCount > 999 ? '999+' : f.unreadItemCount}
         </span>
       )}
-    </button>
+    </div>
   );
 }
 

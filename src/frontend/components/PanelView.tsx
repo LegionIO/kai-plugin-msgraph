@@ -15,6 +15,7 @@ import { ensureSyntaxThemeInjected } from '../editor/syntax-theme.ts';
 import { AdaptiveCard, type CardInvokeRequest } from './AdaptiveCard.tsx';
 import { ForwardDialog } from './ForwardDialog.tsx';
 import { TaskModuleDialog } from './TaskModuleDialog.tsx';
+import { ViewTabs } from './ViewTabs.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
 
@@ -217,7 +218,12 @@ export function PanelView({ pluginState, onAction }: Props) {
       {/* Top bar */}
       <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2 shrink-0">
         <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-foreground">Teams</h2>
+          <ViewTabs
+            active="teams"
+            onNavigate={(v) => onAction('navigate-panel', { view: v })}
+            chatUnread={(s.chats ?? []).reduce((n, c) => n + (c.unread ? 1 : 0), 0)}
+            mailUnread={(s.mailFolders ?? []).find((f) => f.wellKnownName === 'inbox')?.unreadItemCount ?? 0}
+          />
           <span
             title={
               s.realtime === 'connected'

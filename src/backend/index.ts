@@ -1210,6 +1210,11 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         void sendTyping(api, chatId).catch((e) => log.warn(`sendTyping: ${e}`));
         break;
       }
+      case 'navigate-panel': {
+        const { view } = data as { view: 'teams' | 'mail' };
+        api.navigation.open({ type: 'panel', panelId: view === 'mail' ? MAIL_PANEL_ID : PANEL_ID });
+        break;
+      }
       case 'open-in-teams': {
         const { url } = data as { url: string };
         let ok = false;
@@ -1373,10 +1378,9 @@ export async function activate(api: PluginAPI): Promise<void> {
   });
 
   api.onAction(`panel:${PANEL_ID}`, (action, data) => handlePanelAction(api, action, data));
+  const SHARED_ACTIONS = new Set(['login', 'logout', 'open-external', 'search-people', 'navigate-panel']);
   api.onAction(`panel:${MAIL_PANEL_ID}`, (action, data) =>
-    action === 'login' || action === 'logout' || action === 'open-external' || action === 'search-people'
-      ? handlePanelAction(api, action, data)
-      : handleMailAction(api, action, data),
+    SHARED_ACTIONS.has(action) ? handlePanelAction(api, action, data) : handleMailAction(api, action, data),
   );
   api.onAction('settings:SettingsView', (action, data) => handleSettingsAction(api, action, data));
 

@@ -471,7 +471,7 @@ export class GraphClient {
   async listMailFolders(): Promise<MailFolder[]> {
     const [all, ...wk] = await Promise.all([
       this.request<GraphList<RawMailFolder>>('GET', '/me/mailFolders', {
-        query: { $top: '50', $select: 'id,displayName,unreadItemCount,totalItemCount' },
+        query: { $top: '50', $select: MAIL_FOLDER_SELECT },
       }),
       ...(['inbox', 'drafts', 'sentitems', 'archive', 'deleteditems', 'junkemail'] as const).map((n) =>
         this.request<{ id: string }>('GET', `/me/mailFolders/${n}`, { query: { $select: 'id' } })
@@ -481,7 +481,16 @@ export class GraphClient {
     ]);
     const idToWk = new Map<string, string>();
     for (const x of wk) if (x) idToWk.set(x.id, x.name);
-    return all.value.map((f) => normalizeMailFolder(f, idToWk.get(f.id) ?? null));
+    return all.value.map((f) => normalizeMailFolder(f, idToWk.get(f.id) ?? null, null, 0));
+  }
+
+  async listChildFolders(parentId: string, depth: number): Promise<MailFolder[]> {
+    const r = await this.request<GraphList<RawMailFolder>>(
+      'GET',
+      `/me/mailFolders/${encodeURIComponent(parentId)}/childFolders`,
+      { query: { $top: '100', $select: MAIL_FOLDER_SELECT } },
+    );
+    return r.value.map((f) => normalizeMailFolder(f, null, parentId, depth));
   }
 
   async listMail(
@@ -655,12 +664,14 @@ export class GraphClient {
 const MAIL_SUMMARY_SELECT =
   'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,isDraft,hasAttachments,flag,importance,bodyPreview,webLink';
 
+const MAIL_FOLDER_SELECT = 'id,displayName,unreadItemCount,totalItemCount,childFolderCount';
+
 interface RawMailFolder {
   id: string;
   displayName?: string;
-  wellKnownName?: string | null;
   unreadItemCount?: number;
   totalItemCount?: number;
+  childFolderCount?: number;
 }
 interface RawEmailAddress { emailAddress?: { name?: string; address?: string } }
 interface RawAttachment {
@@ -689,13 +700,21 @@ function addr(r: RawEmailAddress): MailAddress {
   return { name: r.emailAddress?.name ?? null, address: r.emailAddress?.address ?? '' };
 }
 
-function normalizeMailFolder(f: RawMailFolder, wellKnownName: string | null): MailFolder {
+function normalizeMailFolder(
+  f: RawMailFolder,
+  wellKnownName: string | null,
+  parentId: string | null,
+  depth: number,
+): MailFolder {
   return {
     id: f.id,
     displayName: f.displayName ?? f.id,
     wellKnownName,
     unreadItemCount: f.unreadItemCount ?? 0,
     totalItemCount: f.totalItemCount ?? 0,
+    childFolderCount: f.childFolderCount ?? 0,
+    parentId,
+    depth,
   };
 }
 

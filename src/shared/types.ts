@@ -184,6 +184,9 @@ export interface MailFolder {
   wellKnownName: string | null;
   unreadItemCount: number;
   totalItemCount: number;
+  childFolderCount: number;
+  parentId: string | null;
+  depth: number;
 }
 
 export interface NormalizedMailSummary {
@@ -352,6 +355,8 @@ export interface MsgraphPluginState {
   hostedContents: Record<string, string | null>;
   // ── Mail ──
   mailFolders: MailFolder[];
+  /** Folder ids whose children have been fetched and are shown. */
+  mailFoldersExpanded: string[];
   activeMailFolder: string;
   mailList: NormalizedMailSummary[];
   mailListNextLink: string | null;

@@ -31,12 +31,13 @@ const st = (api: PluginAPI) => api.state.get() as Partial<MsgraphPluginState>;
 
 export function mailInitialState(): Pick<
   MsgraphPluginState,
-  | 'mailFolders' | 'activeMailFolder' | 'mailList' | 'mailListNextLink' | 'mailSearch'
+  | 'mailFolders' | 'mailFoldersExpanded' | 'activeMailFolder' | 'mailList' | 'mailListNextLink' | 'mailSearch'
   | 'activeMailId' | 'activeMail' | 'mailInlineAttachments' | 'composingMail'
   | 'loadingMailFolders' | 'loadingMailList' | 'loadingMail' | 'sendingMail' | 'mailError'
 > {
   return {
     mailFolders: [],
+    mailFoldersExpanded: [],
     activeMailFolder: 'inbox',
     mailList: [],
     mailListNextLink: null,
@@ -85,7 +86,17 @@ export async function loadMailFolders(api: PluginAPI, allowInteractive = false):
       const bi = order.get((b.wellKnownName ?? '') as typeof WELL_KNOWN_FOLDERS[number]) ?? 99;
       return ai !== bi ? ai - bi : a.displayName.localeCompare(b.displayName);
     });
-    api.state.set('mailFolders', sorted);
+    // Preserve any already-expanded subtrees across refreshes.
+    const prev = st(api).mailFolders ?? [];
+    const expanded = new Set(st(api).mailFoldersExpanded ?? []);
+    const withChildren: typeof sorted = [];
+    for (const f of sorted) {
+      withChildren.push(f);
+      if (expanded.has(f.id)) {
+        for (const c of prev.filter((p) => p.parentId === f.id)) withChildren.push(c);
+      }
+    }
+    api.state.set('mailFolders', withChildren);
     updateMailNavBadge(api);
   } catch (err) {
     if (session === tokenCache.currentSession()) {
@@ -359,6 +370,37 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
         mailSearchSeq++;
         api.state.set('mailSearch', null);
         await loadMailList(api, folderId);
+        break;
+      }
+      case 'toggle-folder': {
+        const { folderId } = data as { folderId: string };
+        const expanded = new Set(st(api).mailFoldersExpanded ?? []);
+        const cur = st(api).mailFolders ?? [];
+        if (expanded.has(folderId)) {
+          // Collapse: remove this id (and any descendants) from expanded, drop descendant rows.
+          const drop = new Set<string>([folderId]);
+          let changed = true;
+          while (changed) {
+            changed = false;
+            for (const f of cur) {
+              if (f.parentId && drop.has(f.parentId) && !drop.has(f.id)) { drop.add(f.id); changed = true; }
+            }
+          }
+          for (const id of drop) expanded.delete(id);
+          expanded.delete(folderId);
+          api.state.set('mailFoldersExpanded', [...expanded]);
+          api.state.set('mailFolders', cur.filter((f) => !f.parentId || !drop.has(f.parentId)));
+        } else {
+          const parent = cur.find((f) => f.id === folderId);
+          if (!parent) break;
+          const client = await ensureAuthenticated(false);
+          const children = await client.listChildFolders(folderId, parent.depth + 1);
+          const idx = cur.findIndex((f) => f.id === folderId);
+          const next = [...cur.slice(0, idx + 1), ...children, ...cur.slice(idx + 1).filter((f) => f.parentId !== folderId)];
+          expanded.add(folderId);
+          api.state.set('mailFoldersExpanded', [...expanded]);
+          api.state.set('mailFolders', next);
+        }
         break;
       }
       case 'load-more-mail': {
