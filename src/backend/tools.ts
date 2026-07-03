@@ -1,4 +1,4 @@
-import type { PluginAPI, GraphUser, GraphChatType } from '../shared/types.js';
+import type { PluginAPI, GraphUser, GraphChatType, MailAddress } from '../shared/types.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
 import { buildMessageBody, withMessageRef, type PendingImage } from '../shared/markdown.js';
@@ -739,6 +739,189 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       },
     },
 
+    // ── Mail (Outlook) ──
+    {
+      name: 'list-mail',
+      description: 'List messages in a mail folder (default: inbox). Returns summaries only; use get-mail for the full body.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          folder: { type: 'string', description: 'Well-known name (inbox, sentitems, archive, drafts, deleteditems) or folder id.', default: 'inbox' },
+          top: { type: 'number', default: 20 },
+        },
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { folder, top } = input as { folder?: string; top?: number };
+          const { messages } = await client.listMail(folder ?? 'inbox', clampTop(top, 20, 50));
+          return { success: true, folder: folder ?? 'inbox', count: messages.length, messages };
+        } catch (err) { return errResult(err); }
+      },
+    },
+    {
+      name: 'get-mail',
+      description: 'Fetch a single mail message by id, including HTML body, all recipients, and attachment metadata.',
+      inputSchema: { type: 'object', properties: { messageId: { type: 'string' } }, required: ['messageId'], additionalProperties: false },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { messageId } = input as { messageId: string };
+          const m = await client.getMail(messageId);
+          return { success: true, message: m };
+        } catch (err) { return errResult(err); }
+      },
+    },
+    {
+      name: 'search-mail',
+      description: 'Full-text search across the mailbox (subject, body, participants). Supports KQL-style filters like from:, to:, hasAttachments:true.',
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string' }, top: { type: 'number', default: 15 } },
+        required: ['query'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { query, top } = input as { query: string; top?: number };
+          const results = await client.searchMail(query, clampTop(top, 15, 50));
+          return { success: true, query, count: results.length, results };
+        } catch (err) { return errResult(err); }
+      },
+    },
+    {
+      name: 'send-mail',
+      description:
+        'Send a new email as the signed-in user. Recipients may be plain email addresses. Body accepts markdown ' +
+        '(bold/italic/code/links) or raw HTML when contentType="html".',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: { type: 'array', items: { type: 'string' }, minItems: 1 },
+          cc: { type: 'array', items: { type: 'string' } },
+          bcc: { type: 'array', items: { type: 'string' } },
+          subject: { type: 'string' },
+          body: { type: 'string' },
+          contentType: { type: 'string', enum: ['markdown', 'html'], default: 'markdown' },
+          attachments: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                contentType: { type: 'string' },
+                contentBytes: { type: 'string', description: 'Base64-encoded file contents.' },
+              },
+              required: ['name', 'contentBytes'],
+            },
+          },
+        },
+        required: ['to', 'subject', 'body'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { to, cc, bcc, subject, body, contentType, attachments } = input as {
+            to: string[]; cc?: string[]; bcc?: string[]; subject: string; body: string;
+            contentType?: 'markdown' | 'html';
+            attachments?: Array<{ name: string; contentType?: string; contentBytes: string }>;
+          };
+          const addrs = (list?: string[]): MailAddress[] => (list ?? []).map((a) => ({ name: null, address: a }));
+          const md = buildMessageBody(body);
+          const bodyHtml = contentType === 'html' ? body : (md.body.contentType === 'html' ? md.body.content : `<p>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>')}</p>`);
+          await client.sendMail({
+            to: addrs(to), cc: addrs(cc), bcc: addrs(bcc), subject, bodyHtml,
+            attachments: attachments?.map((a) => ({ name: a.name, contentType: a.contentType ?? 'application/octet-stream', contentBytes: a.contentBytes })),
+          });
+          return { success: true, to, subject };
+        } catch (err) { return errResult(err); }
+      },
+    },
+    {
+      name: 'reply-to-mail',
+      description: 'Reply, reply-all, or forward an existing message. For forward, provide `to`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          messageId: { type: 'string' },
+          mode: { type: 'string', enum: ['reply', 'replyAll', 'forward'], default: 'reply' },
+          body: { type: 'string' },
+          contentType: { type: 'string', enum: ['markdown', 'html'], default: 'markdown' },
+          to: { type: 'array', items: { type: 'string' }, description: 'Required for forward.' },
+        },
+        required: ['messageId', 'body'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { messageId, mode, body, contentType, to } = input as {
+            messageId: string; mode?: 'reply' | 'replyAll' | 'forward'; body: string;
+            contentType?: 'markdown' | 'html'; to?: string[];
+          };
+          const md = buildMessageBody(body);
+          const bodyHtml = contentType === 'html' ? body : (md.body.contentType === 'html' ? md.body.content : `<p>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>')}</p>`);
+          await client.replyMail(messageId, mode ?? 'reply', {
+            bodyHtml,
+            to: (to ?? []).map((a) => ({ name: null, address: a })),
+          });
+          return { success: true, messageId, mode: mode ?? 'reply' };
+        } catch (err) { return errResult(err); }
+      },
+    },
+    {
+      name: 'mark-mail',
+      description: 'Mark a mail message as read/unread and/or flagged/unflagged.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          messageId: { type: 'string' },
+          isRead: { type: 'boolean' },
+          flagged: { type: 'boolean' },
+        },
+        required: ['messageId'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { messageId, isRead, flagged } = input as { messageId: string; isRead?: boolean; flagged?: boolean };
+          await client.patchMail(messageId, {
+            ...(isRead !== undefined ? { isRead } : {}),
+            ...(flagged !== undefined ? { flag: flagged ? 'flagged' : 'notFlagged' } : {}),
+          });
+          return { success: true, messageId, isRead, flagged };
+        } catch (err) { return errResult(err); }
+      },
+    },
+    {
+      name: 'archive-mail',
+      description: 'Move a message to the Archive folder.',
+      inputSchema: { type: 'object', properties: { messageId: { type: 'string' } }, required: ['messageId'], additionalProperties: false },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          await client.moveMail((input as { messageId: string }).messageId, 'archive');
+          return { success: true };
+        } catch (err) { return errResult(err); }
+      },
+    },
+    {
+      name: 'delete-mail',
+      description: 'Move a message to Deleted Items.',
+      inputSchema: { type: 'object', properties: { messageId: { type: 'string' } }, required: ['messageId'], additionalProperties: false },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          await client.moveMail((input as { messageId: string }).messageId, 'deleteditems');
+          return { success: true };
+        } catch (err) { return errResult(err); }
+      },
+    },
+
     {
       name: 'create-group-chat',
       description:
@@ -812,5 +995,13 @@ export const ALL_TOOL_NAMES = [
   'set-presence',
   'set-status-message',
   'invoke-card-action',
+  'list-mail',
+  'get-mail',
+  'search-mail',
+  'send-mail',
+  'reply-to-mail',
+  'mark-mail',
+  'archive-mail',
+  'delete-mail',
   'create-group-chat',
 ];

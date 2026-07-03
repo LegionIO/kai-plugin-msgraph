@@ -51,7 +51,14 @@ export const AUTO_LOGIN_MFA_TIMEOUT_MS = 120 * ONE_SEC_IN_MS;
 // ── UI IDs ──
 export const PANEL_ID = 'teams-panel';
 export const NAV_ID = 'teams-nav';
+export const MAIL_PANEL_ID = 'outlook-panel';
+export const MAIL_NAV_ID = 'outlook-nav';
 export const SETTINGS_ID = 'msgraph-settings';
+
+// ── Mail ──
+export const MAIL_LIST_TOP = 40;
+export const MAIL_DELTA_POLL_SECONDS = 45;
+export const WELL_KNOWN_FOLDERS = ['inbox', 'drafts', 'sentitems', 'archive', 'deleteditems', 'junkemail'] as const;
 
 // ── Defaults ──
 export const DEFAULT_CHAT_LIST_TOP = 50;

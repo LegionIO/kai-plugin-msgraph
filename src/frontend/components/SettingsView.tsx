@@ -27,6 +27,14 @@ const TOOL_LABELS: Record<keyof ToolPermissions, string> = {
   setPresence: 'set-presence — change your own availability (visible to others)',
   setStatusMessage: 'set-status-message — set/clear your Teams status note',
   invokeCardAction: 'invoke-card-action — click a bot card button (posts on your behalf)',
+  listMail: 'list-mail — list messages in a folder',
+  getMail: 'get-mail — read a single message body',
+  searchMail: 'search-mail — full-text mailbox search',
+  sendMail: 'send-mail — send a new email as you',
+  replyToMail: 'reply-to-mail — reply/reply-all/forward a message',
+  markMail: 'mark-mail — mark read/unread/flag',
+  archiveMail: 'archive-mail — move to Archive',
+  deleteMail: 'delete-mail — move to Deleted Items',
   createGroupChat: 'create-group-chat — new group + optional first message',
 };
 

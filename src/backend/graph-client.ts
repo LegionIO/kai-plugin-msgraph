@@ -1,4 +1,4 @@
-import { GRAPH_BASE_URL, DEFAULT_CHAT_LIST_TOP, DEFAULT_MESSAGE_TOP, CLIENT_ID_OUTLOOK_MOBILE, CLIENT_ID_TEAMS } from '../shared/constants.js';
+import { GRAPH_BASE_URL, DEFAULT_CHAT_LIST_TOP, DEFAULT_MESSAGE_TOP, MAIL_LIST_TOP, CLIENT_ID_OUTLOOK_MOBILE, CLIENT_ID_TEAMS } from '../shared/constants.js';
 import type {
   PluginAPI,
   GraphUser,
@@ -10,6 +10,12 @@ import type {
   NormalizedMessage,
   NormalizedReaction,
   Presence,
+  MailFolder,
+  MailAddress,
+  NormalizedMailSummary,
+  NormalizedMail,
+  MailAttachmentMeta,
+  OutgoingMail,
 } from '../shared/types.js';
 import { GraphApiError, TokenExpiredError } from '../shared/types.js';
 import { ensureAccessToken, forceRefresh, acquireFociAccessToken } from './auth.js';
@@ -459,6 +465,262 @@ export class GraphClient {
       webUrl: h.resource?.webUrl ?? null,
     }));
   }
+
+  // ── Mail (Outlook) ──
+
+  async listMailFolders(): Promise<MailFolder[]> {
+    const r = await this.request<GraphList<RawMailFolder>>('GET', '/me/mailFolders', {
+      query: { $top: '50', $select: 'id,displayName,unreadItemCount,totalItemCount,wellKnownName' },
+    });
+    return r.value.map(normalizeMailFolder);
+  }
+
+  async listMail(
+    folderId: string,
+    top = MAIL_LIST_TOP,
+  ): Promise<{ messages: NormalizedMailSummary[]; nextLink: string | null }> {
+    const r = await this.request<GraphList<RawMail>>(
+      'GET',
+      `/me/mailFolders/${encodeURIComponent(folderId)}/messages`,
+      {
+        query: {
+          $top: String(Math.min(Math.max(top, 1), 100)),
+          $select: MAIL_SUMMARY_SELECT,
+          $orderby: 'receivedDateTime desc',
+        },
+      },
+    );
+    return { messages: r.value.map(normalizeMailSummary), nextLink: r['@odata.nextLink'] ?? null };
+  }
+
+  async listMailPage(nextLink: string): Promise<{ messages: NormalizedMailSummary[]; nextLink: string | null }> {
+    const r = await this.request<GraphList<RawMail>>('GET', nextLink);
+    return { messages: r.value.map(normalizeMailSummary), nextLink: r['@odata.nextLink'] ?? null };
+  }
+
+  /**
+   * Delta on a folder. Pass null to start; store the returned deltaLink and pass
+   * it next time to get only changes (new/updated/@removed).
+   */
+  async mailDelta(
+    folderId: string,
+    deltaLink: string | null,
+  ): Promise<{ changes: Array<NormalizedMailSummary | { removedId: string }>; deltaLink: string | null }> {
+    let url =
+      deltaLink ??
+      `${GRAPH_BASE_URL}/me/mailFolders/${encodeURIComponent(folderId)}/messages/delta?` +
+        new URLSearchParams({ $select: MAIL_SUMMARY_SELECT }).toString();
+    const changes: Array<NormalizedMailSummary | { removedId: string }> = [];
+    let nextDelta: string | null = null;
+    for (let i = 0; i < 10; i++) {
+      const r = await this.request<
+        GraphList<RawMail & { '@removed'?: { reason?: string } }> & { '@odata.deltaLink'?: string }
+      >('GET', url, deltaLink && i === 0 ? {} : { headers: { Prefer: 'odata.maxpagesize=50' } });
+      for (const m of r.value) {
+        if (m['@removed']) changes.push({ removedId: m.id ?? '' });
+        else changes.push(normalizeMailSummary(m));
+      }
+      if (r['@odata.deltaLink']) { nextDelta = r['@odata.deltaLink']; break; }
+      if (!r['@odata.nextLink']) break;
+      url = r['@odata.nextLink'];
+    }
+    return { changes, deltaLink: nextDelta };
+  }
+
+  async getMail(messageId: string): Promise<NormalizedMail> {
+    const m = await this.request<RawMail>('GET', `/me/messages/${encodeURIComponent(messageId)}`, {
+      query: { $select: `${MAIL_SUMMARY_SELECT},body,ccRecipients,bccRecipients` },
+      headers: { Prefer: 'outlook.body-content-type="html"' },
+    });
+    let attachments: MailAttachmentMeta[] = [];
+    if (m.hasAttachments) {
+      const ar = await this.request<GraphList<RawAttachment>>(
+        'GET',
+        `/me/messages/${encodeURIComponent(messageId)}/attachments`,
+        { query: { $select: 'id,name,contentType,size,isInline,contentId' } },
+      );
+      attachments = ar.value.map((a) => ({
+        id: a.id ?? '',
+        name: a.name ?? 'attachment',
+        contentType: a.contentType ?? null,
+        size: a.size ?? 0,
+        isInline: !!a.isInline,
+        contentId: a.contentId ?? null,
+      }));
+    }
+    return {
+      ...normalizeMailSummary(m),
+      ccRecipients: (m.ccRecipients ?? []).map(addr),
+      bccRecipients: (m.bccRecipients ?? []).map(addr),
+      bodyHtml: m.body?.content ?? '',
+      attachments,
+    };
+  }
+
+  async getMailAttachmentBytes(messageId: string, attachmentId: string): Promise<string> {
+    const token = await ensureAccessToken(this.api, { allowInteractive: this.allowInteractive });
+    const resp = await this.fetch(
+      `${GRAPH_BASE_URL}/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/$value`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!resp.ok) throw new GraphApiError(`attachment $value → ${resp.status}`, resp.status);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const ct = resp.headers.get('content-type') || 'application/octet-stream';
+    return `data:${ct};base64,${buf.toString('base64')}`;
+  }
+
+  async patchMail(messageId: string, patch: { isRead?: boolean; flag?: 'flagged' | 'complete' | 'notFlagged' }): Promise<void> {
+    const body: Record<string, unknown> = {};
+    if (patch.isRead !== undefined) body.isRead = patch.isRead;
+    if (patch.flag) body.flag = { flagStatus: patch.flag };
+    await this.request('PATCH', `/me/messages/${encodeURIComponent(messageId)}`, { body });
+  }
+
+  async moveMail(messageId: string, destinationFolderId: string): Promise<string> {
+    const r = await this.request<{ id: string }>('POST', `/me/messages/${encodeURIComponent(messageId)}/move`, {
+      body: { destinationId: destinationFolderId },
+    });
+    return r.id;
+  }
+
+  async deleteMail(messageId: string): Promise<void> {
+    await this.request('DELETE', `/me/messages/${encodeURIComponent(messageId)}`);
+  }
+
+  async sendMail(mail: OutgoingMail): Promise<void> {
+    await this.request('POST', '/me/sendMail', {
+      body: {
+        message: toGraphMail(mail),
+        saveToSentItems: true,
+      },
+    });
+  }
+
+  async replyMail(
+    messageId: string,
+    mode: 'reply' | 'replyAll' | 'forward',
+    mail: Partial<OutgoingMail> & { comment?: string },
+  ): Promise<void> {
+    const path =
+      mode === 'reply' ? 'reply' : mode === 'replyAll' ? 'replyAll' : 'forward';
+    const body: Record<string, unknown> = {};
+    // /reply and /replyAll accept `comment` (plain) or a full `message`; /forward requires toRecipients.
+    const msg = toGraphMail({
+      to: mail.to ?? [],
+      cc: mail.cc,
+      bcc: mail.bcc,
+      subject: mail.subject ?? '',
+      bodyHtml: mail.bodyHtml ?? '',
+      attachments: mail.attachments,
+    });
+    if (mail.bodyHtml || mail.attachments?.length || mail.cc?.length || mail.bcc?.length) {
+      body.message = msg;
+      // Graph rejects an empty subject on message override for reply; omit it.
+      if (!mail.subject) delete (body.message as Record<string, unknown>).subject;
+    } else if (mail.comment) {
+      body.comment = mail.comment;
+    }
+    if (mode === 'forward') {
+      body.toRecipients = (mail.to ?? []).map((a) => ({ emailAddress: { address: a.address, name: a.name ?? undefined } }));
+    }
+    await this.request('POST', `/me/messages/${encodeURIComponent(messageId)}/${path}`, { body });
+  }
+
+  async searchMail(query: string, top = 25): Promise<NormalizedMailSummary[]> {
+    const r = await this.request<GraphList<RawMail>>('GET', '/me/messages', {
+      query: { $search: `"${query.replace(/"/g, '\\"')}"`, $top: String(Math.min(top, 100)), $select: MAIL_SUMMARY_SELECT },
+      headers: { ConsistencyLevel: 'eventual' },
+    });
+    return r.value.map(normalizeMailSummary);
+  }
+}
+
+// ── Mail normalization ──
+
+const MAIL_SUMMARY_SELECT =
+  'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,isDraft,hasAttachments,flag,importance,bodyPreview,webLink';
+
+interface RawMailFolder {
+  id: string;
+  displayName?: string;
+  wellKnownName?: string | null;
+  unreadItemCount?: number;
+  totalItemCount?: number;
+}
+interface RawEmailAddress { emailAddress?: { name?: string; address?: string } }
+interface RawAttachment {
+  id?: string; name?: string; contentType?: string; size?: number; isInline?: boolean; contentId?: string;
+}
+interface RawMail {
+  id?: string;
+  conversationId?: string;
+  subject?: string;
+  from?: RawEmailAddress;
+  toRecipients?: RawEmailAddress[];
+  ccRecipients?: RawEmailAddress[];
+  bccRecipients?: RawEmailAddress[];
+  receivedDateTime?: string;
+  isRead?: boolean;
+  isDraft?: boolean;
+  hasAttachments?: boolean;
+  flag?: { flagStatus?: string };
+  importance?: string;
+  bodyPreview?: string;
+  webLink?: string;
+  body?: { contentType?: string; content?: string };
+}
+
+function addr(r: RawEmailAddress): MailAddress {
+  return { name: r.emailAddress?.name ?? null, address: r.emailAddress?.address ?? '' };
+}
+
+function normalizeMailFolder(f: RawMailFolder): MailFolder {
+  return {
+    id: f.id,
+    displayName: f.displayName ?? f.id,
+    wellKnownName: f.wellKnownName ?? null,
+    unreadItemCount: f.unreadItemCount ?? 0,
+    totalItemCount: f.totalItemCount ?? 0,
+  };
+}
+
+export function normalizeMailSummary(m: RawMail): NormalizedMailSummary {
+  return {
+    id: m.id ?? '',
+    conversationId: m.conversationId ?? null,
+    subject: m.subject ?? '(no subject)',
+    from: m.from ? addr(m.from) : null,
+    toRecipients: (m.toRecipients ?? []).map(addr),
+    receivedDateTime: m.receivedDateTime ?? null,
+    isRead: m.isRead ?? true,
+    isDraft: m.isDraft ?? false,
+    hasAttachments: m.hasAttachments ?? false,
+    flagged: (m.flag?.flagStatus ?? 'notFlagged') === 'flagged',
+    importance: (m.importance as 'low' | 'normal' | 'high') ?? 'normal',
+    bodyPreview: (m.bodyPreview ?? '').replace(/\s+/g, ' ').trim(),
+    webLink: m.webLink ?? null,
+  };
+}
+
+function toGraphMail(mail: OutgoingMail): Record<string, unknown> {
+  const rcpt = (list?: MailAddress[]) =>
+    (list ?? []).map((a) => ({ emailAddress: { address: a.address, name: a.name ?? undefined } }));
+  const out: Record<string, unknown> = {
+    subject: mail.subject,
+    body: { contentType: 'html', content: mail.bodyHtml },
+    toRecipients: rcpt(mail.to),
+  };
+  if (mail.cc?.length) out.ccRecipients = rcpt(mail.cc);
+  if (mail.bcc?.length) out.bccRecipients = rcpt(mail.bcc);
+  if (mail.attachments?.length) {
+    out.attachments = mail.attachments.map((a) => ({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: a.name,
+      contentType: a.contentType,
+      contentBytes: a.contentBytes,
+    }));
+  }
+  return out;
 }
 
 // ── Normalization helpers ──

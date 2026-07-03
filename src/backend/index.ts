@@ -12,6 +12,17 @@ import * as photoCache from './photo-cache.js';
 import * as presenceCache from './presence-cache.js';
 import * as hostedContentCache from './hosted-content-cache.js';
 import * as mediaServer from './media-server.js';
+import {
+  mailInitialState,
+  initMail,
+  loadMailFolders,
+  loadMailList,
+  startMailPoll,
+  stopMailPoll,
+  disposeMail,
+  handleMailAction,
+  updateMailNavBadge,
+} from './mail-backend.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import {
   invokeMessageback,
@@ -35,6 +46,8 @@ import { setLogger, getLogger } from './logger-singleton.js';
 import {
   PANEL_ID,
   NAV_ID,
+  MAIL_PANEL_ID,
+  MAIL_NAV_ID,
   SETTINGS_ID,
   DEFAULT_POLL_INTERVAL_SECONDS,
   TOKEN_REFRESH_BUFFER_MS,
@@ -129,6 +142,7 @@ function initialState(): MsgraphPluginState {
     loadingMessages: false,
     sendingMessage: false,
     error: null,
+    ...mailInitialState(),
   };
 }
 
@@ -194,6 +208,14 @@ function registerEnabledTools(api: PluginAPI): void {
     'set-presence': 'setPresence',
     'set-status-message': 'setStatusMessage',
     'invoke-card-action': 'invokeCardAction',
+    'list-mail': 'listMail',
+    'get-mail': 'getMail',
+    'search-mail': 'searchMail',
+    'send-mail': 'sendMail',
+    'reply-to-mail': 'replyToMail',
+    'mark-mail': 'markMail',
+    'archive-mail': 'archiveMail',
+    'delete-mail': 'deleteMail',
     'create-group-chat': 'createGroupChat',
   };
 
@@ -567,6 +589,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         // secondary caches (FOCI tokens, IC3 region, trouter) key off the new
         // identity instead of leaking the previous account's tokens.
         stopRealtime(api);
+        stopMailPoll();
         clearFociTokens();
         clearIC3State();
         clearTypingThrottle();
@@ -575,7 +598,9 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         hadValidTokenSinceLogout = true;
         publishAuthState(api);
         startRealtime(api);
+        startMailPoll(api);
         await loadChats(api, true);
+        void loadMailFolders(api).then(() => loadMailList(api, 'inbox'));
         void refreshMeProfile(api);
         break;
       }
@@ -586,6 +611,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         meJobTitle = null;
         cancelMfaCode();
         stopRealtime(api);
+        stopMailPoll();
         clearFociTokens();
         clearIC3State();
         clearTypingThrottle();
@@ -600,6 +626,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         api.state.replace(initialState() as unknown as Record<string, unknown>);
         publishCredentialState(api);
         updateNavBadge(api);
+        updateMailNavBadge(api);
         break;
       }
       case 'refresh-chats': {
@@ -1296,6 +1323,7 @@ export async function activate(api: PluginAPI): Promise<void> {
 
   mediaServer.start();
   photoCache.init(api);
+  initMail(api, (allowInteractive = false) => ensureAuthenticated(api, allowInteractive));
   peopleSearchDisk = new DiskCache<PeopleResults>(api.pluginName, 'people-search', {
     hardTtlMs: 24 * 60 * 60_000,
     maxEntries: PEOPLE_CACHE_MAX,
@@ -1314,18 +1342,37 @@ export async function activate(api: PluginAPI): Promise<void> {
     id: PANEL_ID,
     title: 'Teams',
     visible: true,
+    props: { view: 'teams' },
+  });
+  api.ui.registerPanelView({
+    id: MAIL_PANEL_ID,
+    title: 'Outlook',
+    visible: true,
+    width: 'wide',
+    props: { view: 'mail' },
   });
   api.ui.registerNavigationItem({
     id: NAV_ID,
     visible: true,
     target: { type: 'panel', panelId: PANEL_ID },
   });
+  api.ui.registerNavigationItem({
+    id: MAIL_NAV_ID,
+    visible: true,
+    icon: { lucide: 'mail' },
+    target: { type: 'panel', panelId: MAIL_PANEL_ID },
+  });
   api.ui.registerSettingsView({
     id: SETTINGS_ID,
-    label: 'Teams',
+    label: 'Teams & Outlook',
   });
 
   api.onAction(`panel:${PANEL_ID}`, (action, data) => handlePanelAction(api, action, data));
+  api.onAction(`panel:${MAIL_PANEL_ID}`, (action, data) =>
+    action === 'login' || action === 'logout' || action === 'open-external' || action === 'search-people'
+      ? handlePanelAction(api, action, data)
+      : handleMailAction(api, action, data),
+  );
   api.onAction('settings:SettingsView', (action, data) => handleSettingsAction(api, action, data));
 
   try {
@@ -1390,6 +1437,22 @@ export async function activate(api: PluginAPI): Promise<void> {
           },
         },
         {
+          event: 'mail-received',
+          title: 'Mail received',
+          description: 'A new inbox message arrived.',
+          payloadSchema: {
+            type: 'object',
+            properties: {
+              messageId: { type: 'string' },
+              subject: { type: 'string' },
+              from: { type: 'object', properties: { name: { type: 'string' }, address: { type: 'string' } } },
+              preview: { type: 'string' },
+              receivedDateTime: { type: 'string' },
+              hasAttachments: { type: 'boolean' },
+            },
+          },
+        },
+        {
           event: 'presence-changed',
           title: 'Presence changed',
           description: "A subscribed user's Teams availability changed.",
@@ -1405,6 +1468,15 @@ export async function activate(api: PluginAPI): Promise<void> {
         },
       ],
       actions: [
+        {
+          targetId: `panel:${MAIL_PANEL_ID}`,
+          title: 'Outlook panel action',
+          description:
+            'Dispatch a mail action. Set the action verb to one of: send-mail {mail:{to,subject,bodyHtml}}, ' +
+            'mark-mail {messageId,isRead|flag}, archive-mail {messageId}, delete-mail {messageId}, ' +
+            'select-folder {folderId}, select-mail {messageId}.',
+          inputSchema: { type: 'object', additionalProperties: true },
+        },
         {
           targetId: `panel:${PANEL_ID}`,
           title: 'Teams panel action',
@@ -1437,7 +1509,9 @@ export async function activate(api: PluginAPI): Promise<void> {
         await acquireTokenSilent(api);
         publishAuthState(api);
         startRealtime(api);
+        startMailPoll(api);
         await loadChats(api);
+        void loadMailFolders(api).then(() => loadMailList(api, 'inbox'));
         await refreshMeProfile(api);
       } catch (err) {
         log.warn(`Startup silent refresh failed: ${err}`);
@@ -1472,6 +1546,7 @@ export async function deactivate(): Promise<void> {
   photoCache.flush();
   peopleSearchDisk?.dispose();
   threadCache?.dispose();
+  disposeMail();
   mediaServer.stop();
   pollTimer = null;
   refreshTimer = null;

@@ -171,6 +171,74 @@ export interface NormalizedMessage {
   deleted: boolean;
 }
 
+// ── Mail (Outlook via Graph) ──
+
+export interface MailAddress {
+  name: string | null;
+  address: string;
+}
+
+export interface MailFolder {
+  id: string;
+  displayName: string;
+  wellKnownName: string | null;
+  unreadItemCount: number;
+  totalItemCount: number;
+}
+
+export interface NormalizedMailSummary {
+  id: string;
+  conversationId: string | null;
+  subject: string;
+  from: MailAddress | null;
+  toRecipients: MailAddress[];
+  receivedDateTime: string | null;
+  isRead: boolean;
+  isDraft: boolean;
+  hasAttachments: boolean;
+  flagged: boolean;
+  importance: 'low' | 'normal' | 'high';
+  bodyPreview: string;
+  webLink: string | null;
+}
+
+export interface MailAttachmentMeta {
+  id: string;
+  name: string;
+  contentType: string | null;
+  size: number;
+  isInline: boolean;
+  contentId: string | null;
+}
+
+export interface NormalizedMail extends NormalizedMailSummary {
+  ccRecipients: MailAddress[];
+  bccRecipients: MailAddress[];
+  bodyHtml: string;
+  attachments: MailAttachmentMeta[];
+}
+
+export interface OutgoingMail {
+  to: MailAddress[];
+  cc?: MailAddress[];
+  bcc?: MailAddress[];
+  subject: string;
+  bodyHtml: string;
+  /** Base64 file attachments. */
+  attachments?: Array<{ name: string; contentType: string; contentBytes: string }>;
+}
+
+export interface MailComposeState {
+  mode: 'new' | 'reply' | 'replyAll' | 'forward';
+  /** Source message when replying/forwarding. */
+  sourceId: string | null;
+  to: MailAddress[];
+  cc: MailAddress[];
+  subject: string;
+  /** Quoted original (HTML) appended below the user's body when replying/forwarding. */
+  quotedHtml: string | null;
+}
+
 export interface Presence {
   availability: string;
   activity: string;
@@ -276,6 +344,22 @@ export interface MsgraphPluginState {
   presence: Record<string, Presence>;
   /** hostedContent URL → data-URL (or null when fetch permanently failed). */
   hostedContents: Record<string, string | null>;
+  // ── Mail ──
+  mailFolders: MailFolder[];
+  activeMailFolder: string;
+  mailList: NormalizedMailSummary[];
+  mailListNextLink: string | null;
+  mailSearch: { query: string; loading: boolean; results: NormalizedMailSummary[]; error?: string | null } | null;
+  activeMailId: string | null;
+  activeMail: NormalizedMail | null;
+  /** attachmentId → data-URL (inline images). */
+  mailInlineAttachments: Record<string, string | null>;
+  composingMail: MailComposeState | null;
+  loadingMailFolders: boolean;
+  loadingMailList: boolean;
+  loadingMail: boolean;
+  sendingMail: boolean;
+  mailError: string | null;
   loadingChats: boolean;
   loadingMessages: boolean;
   sendingMessage: boolean;
@@ -307,6 +391,14 @@ export interface ToolPermissions {
   setPresence: boolean;
   setStatusMessage: boolean;
   invokeCardAction: boolean;
+  listMail: boolean;
+  getMail: boolean;
+  searchMail: boolean;
+  sendMail: boolean;
+  replyToMail: boolean;
+  markMail: boolean;
+  archiveMail: boolean;
+  deleteMail: boolean;
 }
 
 export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
@@ -327,6 +419,14 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
   setPresence: true,
   setStatusMessage: true,
   invokeCardAction: false,
+  listMail: true,
+  getMail: true,
+  searchMail: true,
+  sendMail: true,
+  replyToMail: true,
+  markMail: true,
+  archiveMail: true,
+  deleteMail: false,
 };
 
 // ── Plugin API (subset used by this plugin) ──
