@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import type { MailAddress, MailComposeState, MsgraphPluginState, OutgoingMail } from '../../shared/types.ts';
-import { mdToHtml } from '../../shared/markdown.ts';
 import { fileToBase64 } from './NewChatDialog.tsx';
+import { MailEditor, type MailEditorHandle } from '../editor/MailEditor.tsx';
 
 export function MailComposeDialog({
   compose,
@@ -18,23 +18,35 @@ export function MailComposeDialog({
   const [cc, setCc] = useState<MailAddress[]>(compose.cc);
   const [showCc, setShowCc] = useState(compose.cc.length > 0);
   const [subject, setSubject] = useState(compose.subject);
-  const [body, setBody] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
+  const editorRef = useRef<MailEditorHandle>(null);
 
   const canSend = !sending && subject.trim().length > 0 && (to.length > 0 || compose.mode === 'reply' || compose.mode === 'replyAll');
 
   const send = async () => {
-    const attachments = await Promise.all(
-      files.map(async (f) => ({
-        name: f.name,
-        contentType: f.type || 'application/octet-stream',
-        contentBytes: await fileToBase64(f),
-      })),
-    );
-    const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-    let bodyHtml = mdToHtml(body) ?? `<p>${esc(body)}</p>`;
+    const [serialized, fileAtts] = await Promise.all([
+      editorRef.current?.serialize() ?? Promise.resolve({ html: '', inlineImages: [], isEmpty: true }),
+      Promise.all(
+        files.map(async (f) => ({
+          name: f.name,
+          contentType: f.type || 'application/octet-stream',
+          contentBytes: await fileToBase64(f),
+        })),
+      ),
+    ]);
+    let bodyHtml = serialized.html;
     if (compose.quotedHtml) bodyHtml += `<br>${compose.quotedHtml}`;
+    const attachments = [
+      ...serialized.inlineImages.map((img) => ({
+        name: img.name,
+        contentType: img.contentType,
+        contentBytes: img.contentBytes,
+        contentId: img.cid,
+        isInline: true,
+      })),
+      ...fileAtts,
+    ];
     const mail: OutgoingMail = { to, cc, subject, bodyHtml, attachments: attachments.length ? attachments : undefined };
     onAction('send-mail', { mail });
   };
@@ -106,14 +118,7 @@ export function MailComposeDialog({
               className="flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
             />
           </div>
-          <textarea
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            placeholder="Write your message… (markdown supported)"
-            rows={10}
-            style={{ resize: 'vertical', minHeight: 160 }}
-            className="w-full rounded-md border border-border bg-background px-2.5 py-2 text-sm font-sans focus:outline-none focus:ring-1 focus:ring-primary"
-          />
+          <MailEditor ref={editorRef} minHeight={200} />
           {files.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {files.map((f, i) => (

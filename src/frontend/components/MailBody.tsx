@@ -1,5 +1,9 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import DOMPurify from 'dompurify';
+
+// 1×1 transparent placeholder shown until the user opts into external content.
+const BLANK_PX = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+const isExternal = (u: string) => /^https?:\/\//i.test(u);
 
 let cssInjected = false;
 function ensureCss() {
@@ -47,8 +51,10 @@ export function MailBody({
 }) {
   ensureCss();
   ensureHooks();
+  const [loadExternal, setLoadExternal] = useState(false);
+  useEffect(() => setLoadExternal(false), [html]);
 
-  const sanitized = useMemo(() => {
+  const { sanitized, blockedCount } = useMemo(() => {
     let src = html;
     // Resolve cid: references to fetched inline attachments.
     if (Object.keys(inlineAttachments).length) {
@@ -58,25 +64,59 @@ export function MailBody({
         return url ? `src=${q}${url}${q}` : `data-cid=${q}${cid}${q}`;
       });
     }
-    return DOMPurify.sanitize(src, {
+    // Gate external http(s) images (tracking pixels, remote content) until opted in.
+    let blocked = 0;
+    if (!loadExternal) {
+      src = src.replace(
+        /(<img\b[^>]*\bsrc\s*=\s*)(["'])(https?:\/\/[^"']+)\2/gi,
+        (_m, pre: string, q: string, url: string) => {
+          blocked++;
+          return `${pre}${q}${BLANK_PX}${q} data-blocked-src=${q}${url}${q}`;
+        },
+      );
+      src = src.replace(/\b(background(?:-image)?\s*:\s*)url\((["']?)(https?:\/\/[^)"']+)\2\)/gi, (_m, pre: string) => {
+        blocked++;
+        return `${pre}none`;
+      });
+    }
+    const clean = DOMPurify.sanitize(src, {
       USE_PROFILES: { html: true },
       FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form', 'meta', 'link'],
       FORBID_ATTR: ['onerror', 'onload', 'onclick', 'srcset'],
+      ADD_ATTR: ['data-blocked-src'],
       ALLOW_DATA_ATTR: false,
     });
-  }, [html, inlineAttachments]);
+    return { sanitized: clean, blockedCount: blocked };
+  }, [html, inlineAttachments, loadExternal]);
 
   return (
-    <div
-      className="msg-mailbody"
-      onClick={(e) => {
-        const a = (e.target as HTMLElement).closest('a');
-        if (a && a.getAttribute('href')) {
-          e.preventDefault();
-          onOpenLink(a.getAttribute('href')!);
-        }
-      }}
-      dangerouslySetInnerHTML={{ __html: sanitized }}
-    />
+    <>
+      {!loadExternal && blockedCount > 0 && (
+        <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-[11px]">
+          <span className="text-muted-foreground">
+            {blockedCount} external image{blockedCount === 1 ? '' : 's'} blocked to prevent tracking.
+          </span>
+          <button
+            type="button"
+            onClick={() => setLoadExternal(true)}
+            className="px-2.5 py-1 text-[11px] font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+          >
+            Load images
+          </button>
+        </div>
+      )}
+      <div
+        className="msg-mailbody"
+        onClick={(e) => {
+          const a = (e.target as HTMLElement).closest('a');
+          if (a && a.getAttribute('href')) {
+            e.preventDefault();
+            const href = a.getAttribute('href')!;
+            if (isExternal(href) || href.startsWith('mailto:')) onOpenLink(href);
+          }
+        }}
+        dangerouslySetInnerHTML={{ __html: sanitized }}
+      />
+    </>
   );
 }

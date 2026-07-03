@@ -224,8 +224,14 @@ export interface OutgoingMail {
   bcc?: MailAddress[];
   subject: string;
   bodyHtml: string;
-  /** Base64 file attachments. */
-  attachments?: Array<{ name: string; contentType: string; contentBytes: string }>;
+  /** Base64 file attachments. Set contentId + isInline for images referenced via cid: in bodyHtml. */
+  attachments?: Array<{
+    name: string;
+    contentType: string;
+    contentBytes: string;
+    contentId?: string;
+    isInline?: boolean;
+  }>;
 }
 
 export interface MailComposeState {

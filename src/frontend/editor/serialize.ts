@@ -128,6 +128,39 @@ export async function serializeToTeams(
   return { payload, isEmpty };
 }
 
+export interface SerializedMail {
+  html: string;
+  /** Inline images to attach; body references them via src="cid:{cid}". */
+  inlineImages: Array<{ cid: string; name: string; contentType: string; contentBytes: string }>;
+  isEmpty: boolean;
+}
+
+export async function serializeToMail(editor: LexicalEditor): Promise<SerializedMail> {
+  const { html, plain, ctx } = editor.getEditorState().read(() => {
+    const c: Ctx = { mentions: [], images: [] };
+    const root = $getRoot();
+    const h = root.getChildren().map((b) => blockHtml(b, c)).join('');
+    return { html: h, plain: root.getTextContent(), ctx: c };
+  });
+  // Rewrite Teams-style hostedContents refs to cid: for mail.
+  const rewritten = html.replace(
+    /src="\.\.\/hostedContents\/([^/]+)\/\$value"/g,
+    (_m, id: string) => `src="cid:${id}"`,
+  );
+  const inlineImages: SerializedMail['inlineImages'] = [];
+  for (const img of ctx.images) {
+    const file = pendingImageFiles.get(img.tempId);
+    if (!file) continue;
+    inlineImages.push({
+      cid: img.tempId,
+      name: file.name || `image.${(img.contentType.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '')}`,
+      contentType: img.contentType,
+      contentBytes: await fileToBase64(file),
+    });
+  }
+  return { html: rewritten, inlineImages, isEmpty: !plain.trim() && ctx.images.length === 0 };
+}
+
 function ctxProbeSimple(node: LexicalNode | undefined): boolean {
   if (!node || !$isParagraphNode(node)) return false;
   for (const c of node.getChildren()) {

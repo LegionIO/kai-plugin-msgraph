@@ -469,10 +469,19 @@ export class GraphClient {
   // ── Mail (Outlook) ──
 
   async listMailFolders(): Promise<MailFolder[]> {
-    const r = await this.request<GraphList<RawMailFolder>>('GET', '/me/mailFolders', {
-      query: { $top: '50', $select: 'id,displayName,unreadItemCount,totalItemCount,wellKnownName' },
-    });
-    return r.value.map(normalizeMailFolder);
+    const [all, ...wk] = await Promise.all([
+      this.request<GraphList<RawMailFolder>>('GET', '/me/mailFolders', {
+        query: { $top: '50', $select: 'id,displayName,unreadItemCount,totalItemCount' },
+      }),
+      ...(['inbox', 'drafts', 'sentitems', 'archive', 'deleteditems', 'junkemail'] as const).map((n) =>
+        this.request<{ id: string }>('GET', `/me/mailFolders/${n}`, { query: { $select: 'id' } })
+          .then((r) => ({ name: n, id: r.id }))
+          .catch(() => null),
+      ),
+    ]);
+    const idToWk = new Map<string, string>();
+    for (const x of wk) if (x) idToWk.set(x.id, x.name);
+    return all.value.map((f) => normalizeMailFolder(f, idToWk.get(f.id) ?? null));
   }
 
   async listMail(
@@ -537,7 +546,7 @@ export class GraphClient {
       const ar = await this.request<GraphList<RawAttachment>>(
         'GET',
         `/me/messages/${encodeURIComponent(messageId)}/attachments`,
-        { query: { $select: 'id,name,contentType,size,isInline,contentId' } },
+        { query: { $select: 'id,name,contentType,size,isInline' } },
       );
       attachments = ar.value.map((a) => ({
         id: a.id ?? '',
@@ -545,7 +554,7 @@ export class GraphClient {
         contentType: a.contentType ?? null,
         size: a.size ?? 0,
         isInline: !!a.isInline,
-        contentId: a.contentId ?? null,
+        contentId: null,
       }));
     }
     return {
@@ -557,16 +566,22 @@ export class GraphClient {
     };
   }
 
-  async getMailAttachmentBytes(messageId: string, attachmentId: string): Promise<string> {
-    const token = await ensureAccessToken(this.api, { allowInteractive: this.allowInteractive });
-    const resp = await this.fetch(
-      `${GRAPH_BASE_URL}/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}/$value`,
-      { headers: { Authorization: `Bearer ${token}` } },
+  /** Fetch a single attachment fully (contentId + contentBytes for fileAttachment). */
+  async getMailAttachment(
+    messageId: string,
+    attachmentId: string,
+  ): Promise<{ contentId: string | null; dataUrl: string; name: string }> {
+    const a = await this.request<RawAttachment & { contentBytes?: string }>(
+      'GET',
+      `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
     );
-    if (!resp.ok) throw new GraphApiError(`attachment $value → ${resp.status}`, resp.status);
-    const buf = Buffer.from(await resp.arrayBuffer());
-    const ct = resp.headers.get('content-type') || 'application/octet-stream';
-    return `data:${ct};base64,${buf.toString('base64')}`;
+    const ct = a.contentType || 'application/octet-stream';
+    const bytes = a.contentBytes ?? '';
+    return {
+      contentId: a.contentId ?? null,
+      dataUrl: `data:${ct};base64,${bytes}`,
+      name: a.name ?? 'attachment',
+    };
   }
 
   async patchMail(messageId: string, patch: { isRead?: boolean; flag?: 'flagged' | 'complete' | 'notFlagged' }): Promise<void> {
@@ -674,11 +689,11 @@ function addr(r: RawEmailAddress): MailAddress {
   return { name: r.emailAddress?.name ?? null, address: r.emailAddress?.address ?? '' };
 }
 
-function normalizeMailFolder(f: RawMailFolder): MailFolder {
+function normalizeMailFolder(f: RawMailFolder, wellKnownName: string | null): MailFolder {
   return {
     id: f.id,
     displayName: f.displayName ?? f.id,
-    wellKnownName: f.wellKnownName ?? null,
+    wellKnownName,
     unreadItemCount: f.unreadItemCount ?? 0,
     totalItemCount: f.totalItemCount ?? 0,
   };
@@ -718,6 +733,7 @@ function toGraphMail(mail: OutgoingMail): Record<string, unknown> {
       name: a.name,
       contentType: a.contentType,
       contentBytes: a.contentBytes,
+      ...(a.contentId ? { contentId: a.contentId, isInline: a.isInline ?? true } : {}),
     }));
   }
   return out;

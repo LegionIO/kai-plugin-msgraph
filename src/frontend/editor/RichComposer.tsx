@@ -62,7 +62,7 @@ import type { MsgraphPluginState, Presence } from '../../shared/types.ts';
 
 // ── Theme (class names Kai's Tailwind is likely to have; layout via inline style) ──
 
-const theme = {
+export const theme = {
   paragraph: 'm-0',
   text: {
     bold: 'font-semibold',
@@ -75,7 +75,7 @@ const theme = {
   codeHighlight: lexicalCodeHighlightTheme,
 };
 
-const MD_TRANSFORMERS = [
+export const MD_TRANSFORMERS = [
   BOLD_ITALIC_STAR,
   BOLD_STAR,
   ITALIC_STAR,
@@ -101,7 +101,7 @@ export interface RichComposerProps {
   presence: Record<string, Presence>;
 }
 
-function CodeHighlightPlugin() {
+export function CodeHighlightPlugin() {
   const [editor] = useLexicalComposerContext();
   useEffect(() => registerCodeHighlighting(editor), [editor]);
   return null;
@@ -475,7 +475,7 @@ function ComposerInner({
   );
 }
 
-function ToolbarBtn({
+export function ToolbarBtn({
   active,
   onClick,
   title,
@@ -502,7 +502,7 @@ function ToolbarBtn({
   );
 }
 
-function hasNonTextContent(editor: LexicalEditor): boolean {
+export function hasNonTextContent(editor: LexicalEditor): boolean {
   return editor.getEditorState().read(() => {
     let found = false;
     $getRoot().getChildren().forEach((b) => {
@@ -520,7 +520,7 @@ import type { LexicalNode } from 'lexical';
 
 // ── Code-block boundary escape (arrow past first/last line inserts a sibling paragraph) ──
 
-function CodeBlockEscapePlugin() {
+export function CodeBlockEscapePlugin() {
   const [editor] = useLexicalComposerContext();
   useEffect(() => {
     const escape = (dir: 'up' | 'down') => (ev: KeyboardEvent | null | undefined) => {
@@ -639,7 +639,7 @@ function convertFenceLine(node: TextNode): boolean {
   return true;
 }
 
-function FenceTransformPlugin() {
+export function FenceTransformPlugin() {
   const [editor] = useLexicalComposerContext();
   useEffect(() => {
     return mergeRegister(

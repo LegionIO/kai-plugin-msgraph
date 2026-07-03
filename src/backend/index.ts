@@ -167,6 +167,8 @@ function updateNavBadge(api: PluginAPI): void {
   const unread = chats.reduce((n, c) => n + (c.unread ? 1 : 0), 0);
   api.ui.registerNavigationItem({
     id: NAV_ID,
+    label: 'Teams',
+    icon: { lucide: 'message-square-more' },
     visible: true,
     badge: unread > 0 ? unread : undefined,
     target: { type: 'panel', panelId: PANEL_ID },
@@ -1353,13 +1355,16 @@ export async function activate(api: PluginAPI): Promise<void> {
   });
   api.ui.registerNavigationItem({
     id: NAV_ID,
+    label: 'Teams',
+    icon: { lucide: 'message-square-more' },
     visible: true,
     target: { type: 'panel', panelId: PANEL_ID },
   });
   api.ui.registerNavigationItem({
     id: MAIL_NAV_ID,
-    visible: true,
+    label: 'Outlook',
     icon: { lucide: 'mail' },
+    visible: true,
     target: { type: 'panel', panelId: MAIL_PANEL_ID },
   });
   api.ui.registerSettingsView({

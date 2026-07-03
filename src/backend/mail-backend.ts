@@ -63,6 +63,8 @@ export function updateMailNavBadge(api: PluginAPI): void {
   const inbox = (st(api).mailFolders ?? []).find((f) => f.wellKnownName === 'inbox' || f.id === 'inbox');
   api.ui.registerNavigationItem({
     id: MAIL_NAV_ID,
+    label: 'Outlook',
+    icon: { lucide: 'mail' },
     visible: true,
     badge: inbox && inbox.unreadItemCount > 0 ? inbox.unreadItemCount : undefined,
     target: { type: 'panel', panelId: MAIL_PANEL_ID },
@@ -156,7 +158,7 @@ async function loadMailBody(api: PluginAPI, messageId: string): Promise<void> {
       bumpFolderUnread(api, st(api).activeMailFolder ?? 'inbox', -1);
     }
     // Inline images referenced by cid: — fetch and expose via media server.
-    const inline = mail.attachments.filter((a) => a.isInline && a.contentId);
+    const inline = mail.attachments.filter((a) => a.isInline);
     if (inline.length) void fetchInline(api, client, messageId, inline, seq);
   } catch (err) {
     if (seq === mailLoadSeq) api.state.set('mailError', err instanceof Error ? err.message : String(err));
@@ -176,13 +178,13 @@ async function fetchInline(
   for (const a of atts) {
     if (seq !== mailLoadSeq) return;
     try {
-      const dataUrl = await client.getMailAttachmentBytes(messageId, a.id);
-      const key = a.contentId ?? a.id;
+      const { contentId, dataUrl } = await client.getMailAttachment(messageId, a.id);
+      const key = (contentId ?? a.id).replace(/^<|>$/g, '');
       inlineCache.set(key, dataUrl);
       out[key] = mediaServer.urlFor('mailinline', key) ?? dataUrl;
     } catch (err) {
       getLogger().warn(`inline attachment ${a.id}: ${err}`);
-      out[a.contentId ?? a.id] = null;
+      out[a.id] = null;
     }
     if (seq === mailLoadSeq) api.state.set('mailInlineAttachments', { ...(st(api).mailInlineAttachments ?? {}), ...out });
   }
@@ -464,14 +466,13 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
         break;
       }
       case 'download-attachment': {
-        const { messageId, attachmentId, name } = data as { messageId: string; attachmentId: string; name: string };
+        const { messageId, attachmentId } = data as { messageId: string; attachmentId: string; name: string };
         const client = await ensureAuthenticated(false);
-        const dataUrl = await client.getMailAttachmentBytes(messageId, attachmentId);
+        const { dataUrl } = await client.getMailAttachment(messageId, attachmentId);
         const key = `dl:${attachmentId}`;
         inlineCache.set(key, dataUrl);
         const url = mediaServer.urlFor('mailinline', key) ?? dataUrl;
         api.state.set('mailInlineAttachments', { ...(st(api).mailInlineAttachments ?? {}), [key]: url });
-        void name;
         break;
       }
       case 'open-in-outlook': {
