@@ -32,13 +32,6 @@ function fmtFull(iso: string | null): string {
   return new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 }
 
-function initials(name: string | null, addr: string): string {
-  const src = name || addr;
-  const parts = src.replace(/[<>@].*$/, '').split(/[\s,]+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  return src.slice(0, 2).toUpperCase();
-}
-
 export function MailPanelView({ pluginState, onAction }: Props) {
   const s = pluginState ?? ({} as MsgraphPluginState);
   const [panelRef, panelHeight] = usePanelHeight();
@@ -119,7 +112,10 @@ export function MailPanelView({ pluginState, onAction }: Props) {
 
       <div className="flex flex-1 min-h-0">
         {/* Left: search+compose header, then folders | message list */}
-        <div className="flex flex-col border-r border-border/50 min-h-0 shrink-0" style={{ width: 510 }}>
+        <div
+          className="flex flex-col border-r border-border/50 min-h-0 shrink-0 overflow-hidden"
+          style={{ width: 510, minWidth: 400, maxWidth: 510 }}
+        >
           <div className="flex items-center gap-1.5 px-3 pt-3 pb-2 shrink-0">
             <div className="relative flex-1 min-w-0">
               <input
@@ -177,7 +173,7 @@ export function MailPanelView({ pluginState, onAction }: Props) {
             </div>
 
             {/* Message list */}
-            <div className="flex flex-col min-h-0 flex-1">
+            <div className="flex flex-col min-h-0 flex-1 min-w-0 overflow-hidden">
               <div className="flex-1 overflow-y-auto">
             {searching && s.mailSearch?.loading && (
               <div className="px-3 py-3 text-[11px] text-muted-foreground">Searching…</div>
@@ -185,9 +181,20 @@ export function MailPanelView({ pluginState, onAction }: Props) {
             {searching && s.mailSearch?.error && (
               <div className="px-3 py-3 text-[11px] text-destructive">{s.mailSearch.error}</div>
             )}
-            {list.map((m) => (
-              <MailRow key={m.id} m={m} active={s.activeMailId === m.id} onAction={onAction} />
-            ))}
+            {list.map((m) => {
+              const addr = m.from?.address?.toLowerCase();
+              const uid = addr ? (s.mailSenderIds ?? {})[addr] : null;
+              return (
+                <MailRow
+                  key={m.id}
+                  m={m}
+                  active={s.activeMailId === m.id}
+                  senderId={uid ?? null}
+                  photo={uid ? (s.photos ?? {})[uid] : undefined}
+                  onAction={onAction}
+                />
+              );
+            })}
             {!searching && s.mailListNextLink && (
               <button
                 type="button"
@@ -214,6 +221,8 @@ export function MailPanelView({ pluginState, onAction }: Props) {
             <ReadingPane
               mail={mail}
               inline={s.mailInlineAttachments ?? {}}
+              senderId={mail.from?.address ? (s.mailSenderIds ?? {})[mail.from.address.toLowerCase()] ?? null : null}
+              photos={s.photos ?? {}}
               onAction={onAction}
             />
           ) : s.loadingMail ? (
@@ -308,19 +317,40 @@ function FolderRow({
   );
 }
 
-function MailRow({ m, active, onAction }: { m: NormalizedMailSummary; active: boolean; onAction: Props['onAction'] }) {
+function MailRow({
+  m,
+  active,
+  senderId,
+  photo,
+  onAction,
+}: {
+  m: NormalizedMailSummary;
+  active: boolean;
+  senderId: string | null;
+  photo: string | null | undefined;
+  onAction: Props['onAction'];
+}) {
   const [hover, setHover] = useState(false);
+  const senderName = m.from?.name ?? m.from?.address ?? '?';
   return (
     <div
       onClick={() => onAction('select-mail', { messageId: m.id })}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      className={`relative px-3 py-2 border-b border-border/30 cursor-pointer transition-colors ${
+      className={`relative px-3 py-2 border-b border-border/30 cursor-pointer transition-colors overflow-hidden ${
         active ? 'bg-primary/10' : hover ? 'bg-muted/60' : ''
       }`}
     >
-      <div className="flex items-start gap-2">
-        {!m.isRead && <span className="w-2 h-2 rounded-full bg-primary shrink-0 mt-1.5" />}
+      <div className="flex items-start gap-2.5 min-w-0">
+        <div className="relative shrink-0" style={{ marginTop: 2 }}>
+          <Avatar id={senderId ?? m.from?.address ?? '?'} name={senderName} photo={photo} size={8} />
+          {!m.isRead && (
+            <span
+              className="bg-primary rounded-full absolute"
+              style={{ width: 8, height: 8, top: -1, right: -1, boxShadow: '0 0 0 2px var(--card, #111)' }}
+            />
+          )}
+        </div>
         <div className={`flex-1 min-w-0 ${m.isRead ? '' : 'font-semibold'}`}>
           <div className="flex items-baseline justify-between gap-2">
             <div className="text-xs truncate text-foreground">{m.from?.name ?? m.from?.address ?? '(unknown)'}</div>
@@ -374,10 +404,14 @@ function IconBtn({ title, onClick, children }: { title: string; onClick: () => v
 function ReadingPane({
   mail,
   inline,
+  senderId,
+  photos,
   onAction,
 }: {
   mail: NonNullable<MsgraphPluginState['activeMail']>;
   inline: Record<string, string | null>;
+  senderId: string | null;
+  photos: Record<string, string | null>;
   onAction: Props['onAction'];
 }) {
   const nonInline = useMemo(() => mail.attachments.filter((a) => !a.isInline), [mail.attachments]);
@@ -413,12 +447,12 @@ function ReadingPane({
           </div>
         </div>
         <div className="flex items-center gap-2.5 mt-2">
-          <div
-            className="w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-semibold text-white shrink-0"
-            style={{ background: '#4f46e5' }}
-          >
-            {initials(mail.from?.name ?? null, mail.from?.address ?? '?')}
-          </div>
+          <Avatar
+            id={senderId ?? mail.from?.address ?? '?'}
+            name={mail.from?.name ?? mail.from?.address ?? '?'}
+            photo={senderId ? photos[senderId] : undefined}
+            size={8}
+          />
           <div className="min-w-0 flex-1">
             <div className="text-xs font-medium text-foreground truncate">
               {mail.from?.name ?? mail.from?.address}

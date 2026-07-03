@@ -361,6 +361,8 @@ export interface MsgraphPluginState {
   mailList: NormalizedMailSummary[];
   mailListNextLink: string | null;
   mailSearch: { query: string; loading: boolean; results: NormalizedMailSummary[]; error?: string | null } | null;
+  /** email address (lowercased) → AAD user id (or null when external / not found). */
+  mailSenderIds: Record<string, string | null>;
   activeMailId: string | null;
   activeMail: NormalizedMail | null;
   /** attachmentId → data-URL (inline images). */

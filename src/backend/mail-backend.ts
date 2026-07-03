@@ -1,5 +1,6 @@
 import { GraphClient } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
+import * as photoCache from './photo-cache.js';
 import { DiskCache } from './disk-cache.js';
 import * as mediaServer from './media-server.js';
 import { getLogger } from './logger-singleton.js';
@@ -23,7 +24,9 @@ let mailListSeq = 0;
 let mailSearchSeq = 0;
 let deltaLink: string | null = null;
 let deltaCache: DiskCache<string> | null = null;
+let senderIdCache: DiskCache<string | null> | null = null;
 const inlineCache = new Map<string, string | null>();
+const senderInFlight = new Set<string>();
 
 mediaServer.register('mailinline', (k) => inlineCache.get(k) ?? undefined);
 
@@ -31,13 +34,14 @@ const st = (api: PluginAPI) => api.state.get() as Partial<MsgraphPluginState>;
 
 export function mailInitialState(): Pick<
   MsgraphPluginState,
-  | 'mailFolders' | 'mailFoldersExpanded' | 'activeMailFolder' | 'mailList' | 'mailListNextLink' | 'mailSearch'
+  | 'mailFolders' | 'mailFoldersExpanded' | 'mailSenderIds' | 'activeMailFolder' | 'mailList' | 'mailListNextLink' | 'mailSearch'
   | 'activeMailId' | 'activeMail' | 'mailInlineAttachments' | 'composingMail'
   | 'loadingMailFolders' | 'loadingMailList' | 'loadingMail' | 'sendingMail' | 'mailError'
 > {
   return {
     mailFolders: [],
     mailFoldersExpanded: [],
+    mailSenderIds: {},
     activeMailFolder: 'inbox',
     mailList: [],
     mailListNextLink: null,
@@ -58,6 +62,60 @@ export function initMail(api: PluginAPI, ensure: EnsureFn): void {
   ensureAuthenticated = ensure;
   deltaCache = new DiskCache<string>(api.pluginName, 'mail-delta', { hardTtlMs: 7 * 24 * 60 * 60_000, maxEntries: 20, sync: true });
   deltaLink = deltaCache.get('inbox')?.v ?? null;
+  senderIdCache = new DiskCache<string | null>(
+    api.pluginName,
+    'mail-senders',
+    { hardTtlMs: 14 * 24 * 60 * 60_000, maxEntries: 2000 },
+    () => {
+      const seed: Record<string, string | null> = {};
+      for (const [k, e] of senderIdCache!.entries()) seed[k] = e.v;
+      if (Object.keys(seed).length) {
+        api.state.set('mailSenderIds', { ...(st(api).mailSenderIds ?? {}), ...seed });
+      }
+    },
+  );
+}
+
+/** Resolve sender email addresses → AAD user ids (for avatar photos). Cached, throttled. */
+function ensureSenderPhotos(api: PluginAPI, client: GraphClient, messages: NormalizedMailSummary[]): void {
+  const known = st(api).mailSenderIds ?? {};
+  const need = new Set<string>();
+  const haveIds = new Set<string>();
+  for (const m of messages) {
+    const addr = m.from?.address?.toLowerCase();
+    if (!addr) continue;
+    if (addr in known) {
+      const id = known[addr];
+      if (id) haveIds.add(id);
+    } else if (!senderInFlight.has(addr)) {
+      need.add(addr);
+    }
+  }
+  if (haveIds.size) photoCache.ensure(api, client, haveIds);
+  if (need.size === 0) return;
+  const session = tokenCache.currentSession();
+  const batch = [...need].slice(0, 20);
+  for (const a of batch) senderInFlight.add(a);
+  void (async () => {
+    const found: Record<string, string | null> = {};
+    const ids: string[] = [];
+    for (const addr of batch) {
+      if (session !== tokenCache.currentSession()) break;
+      try {
+        const u = await client.getUserByEmail(addr);
+        found[addr] = u?.id ?? null;
+        if (u?.id) ids.push(u.id);
+      } catch {
+        found[addr] = null;
+      } finally {
+        senderInFlight.delete(addr);
+      }
+      senderIdCache?.set(addr, found[addr]);
+    }
+    if (session !== tokenCache.currentSession()) return;
+    api.state.set('mailSenderIds', { ...(st(api).mailSenderIds ?? {}), ...found });
+    if (ids.length) photoCache.ensure(api, client, ids);
+  })();
 }
 
 export function updateMailNavBadge(api: PluginAPI): void {
@@ -125,6 +183,7 @@ export async function loadMailList(api: PluginAPI, folderId: string): Promise<vo
     if (seq !== mailListSeq) return;
     api.state.set('mailList', messages);
     api.state.set('mailListNextLink', nextLink);
+    ensureSenderPhotos(api, client, messages);
   } catch (err) {
     if (seq === mailListSeq) api.state.set('mailError', err instanceof Error ? err.message : String(err));
   } finally {
@@ -145,6 +204,7 @@ async function loadMoreMail(api: PluginAPI): Promise<void> {
     const seen = new Set(cur.map((m) => m.id));
     api.state.set('mailList', [...cur, ...messages.filter((m) => !seen.has(m.id))]);
     api.state.set('mailListNextLink', nextLink);
+    ensureSenderPhotos(api, client, messages);
   } finally {
     if (seq === mailListSeq) api.state.set('loadingMailList', false);
   }
@@ -251,6 +311,7 @@ export function stopMailPoll(): void {
 export function disposeMail(): void {
   stopMailPoll();
   deltaCache?.dispose();
+  senderIdCache?.dispose();
 }
 
 async function runDelta(api: PluginAPI): Promise<void> {
@@ -462,7 +523,10 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
         try {
           const client = await ensureAuthenticated(false);
           const results = await client.searchMail(q, 40);
-          if (seq === mailSearchSeq) api.state.set('mailSearch', { query: q, loading: false, results });
+          if (seq === mailSearchSeq) {
+            api.state.set('mailSearch', { query: q, loading: false, results });
+            ensureSenderPhotos(api, client, results);
+          }
         } catch (err) {
           if (seq === mailSearchSeq) {
             api.state.set('mailSearch', {
