@@ -21,13 +21,16 @@ type Props = PluginComponentProps<MsgraphPluginState>;
 function ReactionChip({
   r,
   fromMe,
+  resolveName,
   onRemove,
 }: {
   r: import('../../shared/types.ts').NormalizedReaction;
   fromMe: boolean;
+  resolveName: (idOrName: string) => string;
   onRemove: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const names = r.users.map(resolveName);
   return (
     <button
       type="button"
@@ -51,7 +54,7 @@ function ReactionChip({
             boxShadow: '0 6px 16px rgba(0,0,0,.4)', pointerEvents: 'none',
           }}
         >
-          {r.users.length ? r.users.join(', ') : 'Reacted'}{r.mine ? ' · click to remove' : ''}
+          {names.length ? names.join(', ') : 'Reacted'}{r.mine ? ' · click to remove' : ''}
         </span>
       )}
     </button>
@@ -161,6 +164,13 @@ export function PanelView({ pluginState, onAction }: Props) {
     () => (s.chats ?? []).find((ch) => ch.id === s.activeChatId) ?? null,
     [s.chats, s.activeChatId],
   );
+
+  const resolveName = useMemo(() => {
+    const map = new Map<string, string>();
+    if (myId) map.set(myId, 'You');
+    for (const mem of activeChat?.members ?? []) map.set(mem.id, mem.displayName);
+    return (idOrName: string) => map.get(idOrName) ?? (/^[0-9a-f-]{36}$/i.test(idOrName) ? 'Someone' : idOrName);
+  }, [activeChat, myId]);
 
   const messages = s.activeChatMessages ?? [];
 
@@ -549,6 +559,7 @@ export function PanelView({ pluginState, onAction }: Props) {
                   onAction={onAction}
                   activeChatId={s.activeChatId ?? ''}
                   cardPending={s.cardActionPending === m.id}
+                  resolveName={resolveName}
                 />
               ))}
               {seenIdx === messages.length - 1 && messages[seenIdx]?.fromMe && (
@@ -954,6 +965,7 @@ function MessageBubble({
   onAction,
   activeChatId,
   cardPending,
+  resolveName,
 }: {
   m: NormalizedMessage;
   photos: Record<string, string | null>;
@@ -969,6 +981,7 @@ function MessageBubble({
   onAction: (action: string, data?: unknown) => void;
   activeChatId: string;
   cardPending: boolean;
+  resolveName: (idOrName: string) => string;
 }) {
   const [hover, setHover] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -1138,7 +1151,7 @@ function MessageBubble({
               className="flex gap-0.5"
             >
               {m.reactions.map((r) => (
-                <ReactionChip key={r.type} r={r} fromMe={m.fromMe} onRemove={() => onReact(r.type, true)} />
+                <ReactionChip key={r.type} r={r} fromMe={m.fromMe} resolveName={resolveName} onRemove={() => onReact(r.type, true)} />
               ))}
             </div>
           )}

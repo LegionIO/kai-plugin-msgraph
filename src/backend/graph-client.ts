@@ -658,8 +658,11 @@ export class GraphClient {
       query: { $select: `${MAIL_SUMMARY_SELECT},body,ccRecipients,bccRecipients` },
       headers: { Prefer: 'outlook.body-content-type="html"' },
     });
+    // Graph's `hasAttachments` excludes inline-only attachments, so check the
+    // body for cid: references too.
+    const hasInlineRefs = /\bsrc\s*=\s*["']?cid:/i.test(m.body?.content ?? '');
     let attachments: MailAttachmentMeta[] = [];
-    if (m.hasAttachments) {
+    if (m.hasAttachments || hasInlineRefs) {
       const ar = await this.request<GraphList<RawAttachment>>(
         'GET',
         `/me/messages/${encodeURIComponent(messageId)}/attachments`,
@@ -961,7 +964,10 @@ function normalizeReactions(reactions: GraphReaction[] | undefined, myId: string
     g.count++;
     const uid = r.user?.user?.id;
     const name = r.user?.user?.displayName;
-    if (name) g.users.push(name);
+    // Graph returns displayName:null for reactors; store the id so the frontend
+    // can resolve it against the chat's member list.
+    if (uid) g.users.push(name || uid);
+    else if (name) g.users.push(name);
     if (myId && uid === myId) g.mine = true;
   }
   return [...grouped.values()];

@@ -91,6 +91,14 @@ export function MailBody({
     if (lastHtmlRef.current !== sanitized) {
       host.innerHTML = sanitized;
       lastHtmlRef.current = sanitized;
+      // Preserve author-declared aspect ratio so the 1×1 placeholder doesn't
+      // inflate to a square under height:auto while the real image loads.
+      host.querySelectorAll<HTMLImageElement>('img[data-src]').forEach((img) => {
+        const w = Number(img.getAttribute('width'));
+        const h = Number(img.getAttribute('height'));
+        if (w > 0 && h > 0) img.style.aspectRatio = `${w} / ${h}`;
+        else img.style.maxHeight = '160px';
+      });
     }
     let blocked = 0;
     host.querySelectorAll<HTMLImageElement>('img[data-src]').forEach((img) => {
@@ -106,7 +114,10 @@ export function MailBody({
       } else if (orig) {
         target = orig;
       }
-      if (target && img.getAttribute('src') !== target) img.src = target;
+      if (target && img.getAttribute('src') !== target) {
+        img.src = target;
+        img.style.maxHeight = '';
+      }
     });
     host.querySelectorAll<HTMLElement>('[style*="/*blocked:"]').forEach((el) => {
       if (loadExternal) {
