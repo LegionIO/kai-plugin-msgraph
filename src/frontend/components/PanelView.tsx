@@ -52,13 +52,27 @@ function ReactionChip({
         <span
           style={{
             position: 'absolute', bottom: '100%', [fromMe ? 'left' : 'right']: 0, marginBottom: 6,
-            whiteSpace: 'nowrap', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis',
-            fontSize: 10, lineHeight: '14px', padding: '3px 7px', borderRadius: 5, zIndex: 40,
+            display: 'flex', flexDirection: 'column', gap: 1, minWidth: 90, maxWidth: 220,
+            maxHeight: 180, overflowY: 'auto', textAlign: 'left',
+            fontSize: 10, lineHeight: '14px', padding: '4px 8px', borderRadius: 6, zIndex: 40,
             background: '#18181b', color: '#fafafa', border: '1px solid rgba(127,127,127,.3)',
             boxShadow: '0 6px 16px rgba(0,0,0,.4)', pointerEvents: 'none',
           }}
         >
-          {names.length ? names.join(', ') : 'Reacted'}{r.mine ? ' · click to remove' : ''}
+          {names.length ? (
+            names.map((n, i) => (
+              <span key={i} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {n}
+              </span>
+            ))
+          ) : (
+            <span>Reacted</span>
+          )}
+          {r.mine && (
+            <span style={{ opacity: 0.6, marginTop: 2, borderTop: '1px solid rgba(127,127,127,.25)', paddingTop: 3 }}>
+              click to remove
+            </span>
+          )}
         </span>
       )}
     </span>
