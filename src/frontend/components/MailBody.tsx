@@ -57,14 +57,18 @@ export function MailBody({
   const hostRef = useRef<HTMLDivElement>(null);
   useEffect(() => { setLoadExternal(false); setBlockedCount(0); }, [html]);
 
-  // Sanitize once per message body. All <img> src values are moved to data-src so
-  // nothing loads before we've classified it; the effect below decides per-image.
+  // Sanitize once per message body. cid: and http(s) img src are moved to
+  // data-x-src for post-render classification; data: URLs (already-embedded,
+  // no network) are left in place.
   const sanitized = useMemo(() => {
     const src = html
       .replace(
         /(<img\b[^>]*?\bsrc\s*=\s*)(?:(["'])([^"']*)\2|([^\s>]+))/gi,
-        (_m, pre: string, _q, quoted?: string, bare?: string) =>
-          `${pre}"${BLANK_PX}" data-src="${(quoted ?? bare ?? '').replace(/"/g, '&quot;')}"`,
+        (m, pre: string, _q, quoted?: string, bare?: string) => {
+          const url = (quoted ?? bare ?? '').trim();
+          if (!url || /^data:/i.test(url)) return m;
+          return `${pre}"${BLANK_PX}" data-x-src="${url.replace(/"/g, '&quot;')}"`;
+        },
       )
       .replace(
         /\b(background(?:-image)?\s*:\s*)url\((["']?)(https?:\/\/[^)"']+)\2\)/gi,
@@ -74,8 +78,7 @@ export function MailBody({
       USE_PROFILES: { html: true },
       FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form', 'meta', 'link'],
       FORBID_ATTR: ['onerror', 'onload', 'onclick', 'srcset'],
-      ADD_ATTR: ['data-src'],
-      ALLOW_DATA_ATTR: false,
+      ADD_ATTR: ['data-x-src'],
     });
   }, [html]);
 
@@ -93,7 +96,7 @@ export function MailBody({
       lastHtmlRef.current = sanitized;
       // Preserve author-declared aspect ratio so the 1×1 placeholder doesn't
       // inflate to a square under height:auto while the real image loads.
-      host.querySelectorAll<HTMLImageElement>('img[data-src]').forEach((img) => {
+      host.querySelectorAll<HTMLImageElement>('img[data-x-src]').forEach((img) => {
         const w = Number(img.getAttribute('width'));
         const h = Number(img.getAttribute('height'));
         if (w > 0 && h > 0) img.style.aspectRatio = `${w} / ${h}`;
@@ -101,8 +104,8 @@ export function MailBody({
       });
     }
     let blocked = 0;
-    host.querySelectorAll<HTMLImageElement>('img[data-src]').forEach((img) => {
-      const orig = img.getAttribute('data-src') ?? '';
+    host.querySelectorAll<HTMLImageElement>('img[data-x-src]').forEach((img) => {
+      const orig = img.getAttribute('data-x-src') ?? '';
       let target: string | null = null;
       const cidMatch = /^cid:(.+)$/i.exec(orig);
       if (cidMatch) {
@@ -116,6 +119,7 @@ export function MailBody({
       }
       if (target && img.getAttribute('src') !== target) {
         img.src = target;
+        img.removeAttribute('data-x-src');
         img.style.maxHeight = '';
       }
     });

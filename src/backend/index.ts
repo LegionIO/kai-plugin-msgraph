@@ -172,6 +172,7 @@ function updateNavBadge(api: PluginAPI): void {
     label: 'Teams',
     icon: { lucide: 'message-square-more' },
     visible: true,
+    priority: 0,
     badge: unread > 0 ? unread : undefined,
     target: { type: 'panel', panelId: PANEL_ID },
   });

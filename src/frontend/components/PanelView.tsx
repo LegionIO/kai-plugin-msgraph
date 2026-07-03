@@ -31,13 +31,17 @@ function ReactionChip({
 }) {
   const [hover, setHover] = useState(false);
   const names = r.users.map(resolveName);
+  // Not a <button disabled> — disabled buttons don't fire mouse events in Chromium,
+  // which would suppress the who-reacted tooltip on other people's reactions.
   return (
-    <button
-      type="button"
+    <span
+      role="button"
+      tabIndex={0}
+      aria-disabled={!r.mine}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onClick={() => r.mine && onRemove()}
-      disabled={!r.mine}
+      onKeyDown={(e) => { if (r.mine && (e.key === 'Enter' || e.key === ' ')) onRemove(); }}
       className={`relative inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-card border shadow-sm text-[10px] leading-none ${
         r.mine ? 'border-primary/60 cursor-pointer hover:bg-primary/10' : 'border-border cursor-default'
       }`}
@@ -57,7 +61,7 @@ function ReactionChip({
           {names.length ? names.join(', ') : 'Reacted'}{r.mine ? ' · click to remove' : ''}
         </span>
       )}
-    </button>
+    </span>
   );
 }
 

@@ -127,6 +127,7 @@ export function updateMailNavBadge(api: PluginAPI): void {
     label: 'Outlook',
     icon: { lucide: 'mail' },
     visible: true,
+    priority: 1,
     badge: inbox && inbox.unreadItemCount > 0 ? inbox.unreadItemCount : undefined,
     target: { type: 'panel', panelId: MAIL_PANEL_ID },
   });
