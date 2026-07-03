@@ -1,7 +1,7 @@
 {
   "name": "msgraph",
   "displayName": "Teams & Outlook",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Microsoft Teams chat + Outlook mail via Graph API — read/send/search messages and email with real-time push and AI tooling",
   "icon": {
     "lucide": "message-square-more"
