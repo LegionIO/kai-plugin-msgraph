@@ -370,34 +370,65 @@ function MailRow({
         {m.flagged && <span style={{ color: '#ef4444' }} className="shrink-0 text-xs" title="Flagged">⚑</span>}
       </div>
       {hover && (
-        <div
-          style={{ position: 'absolute', right: 4, top: 4 }}
-          className="flex gap-0.5 rounded-md border border-border bg-card shadow-sm p-0.5"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <IconBtn title={m.isRead ? 'Mark unread' : 'Mark read'} onClick={() => onAction('mark-mail', { messageId: m.id, isRead: !m.isRead })}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m2 7 10 6 10-6" /></svg>
-          </IconBtn>
-          <IconBtn title={m.flagged ? 'Unflag' : 'Flag'} onClick={() => onAction('mark-mail', { messageId: m.id, flag: !m.flagged })}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M4 22V4a2 2 0 0 1 2-2h10l4 4v9H6" /></svg>
-          </IconBtn>
-          <IconBtn title="Archive" onClick={() => onAction('archive-mail', { messageId: m.id })}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><rect x="2" y="3" width="20" height="5" rx="1" /><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4" /></svg>
-          </IconBtn>
-          <IconBtn title="Delete" onClick={() => onAction('delete-mail', { messageId: m.id })}>
-            <svg viewBox="0 0 24 4" fill="none" stroke="currentColor" strokeWidth={2}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
-          </IconBtn>
-        </div>
+        <MailRowActions m={m} onAction={onAction} />
       )}
     </div>
   );
 }
 
-function IconBtn({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button type="button" title={title} onClick={onClick} className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted">
-      <span className="block w-3.5 h-3.5 [&>svg]:w-3.5 [&>svg]:h-3.5">{children}</span>
+function MailRowActions({ m, onAction }: { m: NormalizedMailSummary; onAction: Props['onAction'] }) {
+  const [label, setLabel] = useState<string | null>(null);
+  const btn = (title: string, onClick: () => void, svg: React.ReactNode) => (
+    <button
+      type="button"
+      aria-label={title}
+      onClick={onClick}
+      onMouseEnter={() => setLabel(title)}
+      onMouseLeave={() => setLabel((l) => (l === title ? null : l))}
+      className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted"
+    >
+      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+        {svg}
+      </svg>
     </button>
+  );
+  return (
+    <div
+      style={{ position: 'absolute', right: 4, top: 4 }}
+      className="flex flex-col items-end gap-0.5"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="flex gap-0.5 rounded-md border border-border bg-card shadow-sm p-0.5">
+        {btn(
+          m.isRead ? 'Mark unread' : 'Mark read',
+          () => onAction('mark-mail', { messageId: m.id, isRead: !m.isRead }),
+          <><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m2 7 10 6 10-6" /></>,
+        )}
+        {btn(
+          m.flagged ? 'Unflag' : 'Flag',
+          () => onAction('mark-mail', { messageId: m.id, flag: !m.flagged }),
+          <path d="M4 22V4a2 2 0 0 1 2-2h10l4 4v9H6" />,
+        )}
+        {btn(
+          'Archive',
+          () => onAction('archive-mail', { messageId: m.id }),
+          <><rect x="2" y="3" width="20" height="5" rx="1" /><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4" /></>,
+        )}
+        {btn(
+          'Delete',
+          () => onAction('delete-mail', { messageId: m.id }),
+          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />,
+        )}
+      </div>
+      {label && (
+        <span
+          style={{ fontSize: 10, lineHeight: '14px', padding: '2px 6px', borderRadius: 4, whiteSpace: 'nowrap' }}
+          className="bg-foreground text-background shadow-sm"
+        >
+          {label}
+        </span>
+      )}
+    </div>
   );
 }
 
