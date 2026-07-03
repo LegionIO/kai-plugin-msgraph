@@ -46,12 +46,12 @@ function ReactionChip({
           style={{
             position: 'absolute', bottom: '100%', [fromMe ? 'left' : 'right']: 0, marginBottom: 6,
             whiteSpace: 'nowrap', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis',
-            fontSize: 10, lineHeight: '14px', padding: '3px 7px', borderRadius: 5, zIndex: 30,
-            pointerEvents: 'none',
+            fontSize: 10, lineHeight: '14px', padding: '3px 7px', borderRadius: 5, zIndex: 40,
+            background: '#18181b', color: '#fafafa', border: '1px solid rgba(127,127,127,.3)',
+            boxShadow: '0 6px 16px rgba(0,0,0,.4)', pointerEvents: 'none',
           }}
-          className="bg-foreground text-background shadow-md"
         >
-          {r.users.join(', ') || '—'}{r.mine ? ' · click to remove' : ''}
+          {r.users.length ? r.users.join(', ') : 'Reacted'}{r.mine ? ' · click to remove' : ''}
         </span>
       )}
     </button>
@@ -188,11 +188,44 @@ export function PanelView({ pluginState, onAction }: Props) {
     [messages.length, s.activeChatId, panelHeight, Object.keys(hostedContents).length],
   );
 
+  const olderNextLink = s.activeChatMessagesNextLink;
+  const loadingOlder = !!s.loadingOlderMessages;
+  const olderNextLinkRef = useRef(olderNextLink);
+  const loadingOlderRef = useRef(loadingOlder);
+  useEffect(() => { olderNextLinkRef.current = olderNextLink; loadingOlderRef.current = loadingOlder; },
+    [olderNextLink, loadingOlder]);
+
+  const loadOlder = () => {
+    if (!olderNextLinkRef.current || loadingOlderRef.current) return;
+    loadingOlderRef.current = true;
+    const el = scrollRef.current;
+    const anchor = el ? el.scrollHeight - el.scrollTop : 0;
+    stickToBottomRef.current = false;
+    onAction('load-older-messages');
+    const restore = () => {
+      if (!el) return;
+      el.scrollTop = el.scrollHeight - anchor;
+    };
+    requestAnimationFrame(restore);
+    setTimeout(restore, 60);
+    setTimeout(restore, 250);
+  };
+
   const onThreadScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (el.scrollTop < 60) loadOlder();
   };
+
+  // Auto-fill: if the initial page doesn't overflow the container, keep loading
+  // older pages until it does (or there are none).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || s.loadingMessages || loadingOlder) return;
+    if (olderNextLink && el.scrollHeight <= el.clientHeight + 8) loadOlder();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length, olderNextLink, s.loadingMessages, loadingOlder, panelHeight]);
 
   const react = (messageId: string, reactionType: string, remove = false) => {
     if (!s.activeChatId) return;
@@ -482,32 +515,19 @@ export function PanelView({ pluginState, onAction }: Props) {
               onScroll={onThreadScroll}
               className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 flex flex-col gap-2"
             >
-              {s.activeChatMessagesNextLink && messages.length > 0 && (
-                <button
-                  type="button"
-                  disabled={!!s.loadingOlderMessages}
-                  onClick={() => {
-                    const el = scrollRef.current;
-                    const anchor = el ? el.scrollHeight - el.scrollTop : 0;
-                    stickToBottomRef.current = false;
-                    onAction('load-older-messages');
-                    // Restore scroll position after older messages prepend.
-                    requestAnimationFrame(() => {
-                      const check = () => {
-                        if (!el) return;
-                        if (el.scrollHeight - el.scrollTop !== anchor) {
-                          el.scrollTop = el.scrollHeight - anchor;
-                        }
-                      };
-                      check();
-                      setTimeout(check, 60);
-                      setTimeout(check, 250);
-                    });
-                  }}
-                  className="self-center px-3 py-1 mb-1 text-[11px] text-muted-foreground border border-border rounded-full hover:text-foreground hover:bg-muted disabled:opacity-50"
-                >
-                  {s.loadingOlderMessages ? 'Loading…' : 'Load older messages'}
-                </button>
+              {olderNextLink && messages.length > 0 && (
+                <div className="self-center px-3 py-1 mb-1 text-[11px] text-muted-foreground flex items-center gap-1.5">
+                  {loadingOlder ? (
+                    <>
+                      <span className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                      Loading older…
+                    </>
+                  ) : (
+                    <button type="button" onClick={loadOlder} className="hover:text-foreground underline">
+                      Load older messages
+                    </button>
+                  )}
+                </div>
               )}
               {s.loadingMessages && messages.length === 0 && (
                 <div className="text-xs text-muted-foreground">Loading messages…</div>

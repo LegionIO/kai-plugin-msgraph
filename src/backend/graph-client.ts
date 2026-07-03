@@ -508,6 +508,90 @@ export class GraphClient {
     return all.value.map((f) => normalizeMailFolder(f, idToWk.get(f.id) ?? null, null, 0));
   }
 
+  private async batch(
+    reqs: Array<{ method: string; url: string; body?: unknown }>,
+  ): Promise<Array<{ id: string; status: number; body?: unknown }>> {
+    const out: Array<{ id: string; status: number; body?: unknown }> = [];
+    for (let i = 0; i < reqs.length; i += 20) {
+      const chunk = reqs.slice(i, i + 20).map((r, j) => ({
+        id: String(i + j),
+        method: r.method,
+        url: r.url,
+        ...(r.body !== undefined ? { body: r.body, headers: { 'Content-Type': 'application/json' } } : {}),
+      }));
+      const res = await this.request<{ responses: Array<{ id: string; status: number; body?: unknown }> }>(
+        'POST', '/$batch', { body: { requests: chunk } },
+      );
+      out.push(...res.responses);
+    }
+    return out;
+  }
+
+  async markFolderRead(folderId: string): Promise<number> {
+    let done = 0;
+    let url: string | null =
+      `${GRAPH_BASE_URL}/me/mailFolders/${encodeURIComponent(folderId)}/messages?` +
+      new URLSearchParams({ $filter: 'isRead eq false', $select: 'id', $top: '100' }).toString();
+    while (url) {
+      const page: GraphList<{ id: string }> = await this.request('GET', url);
+      if (page.value.length) {
+        await this.batch(
+          page.value.map((m) => ({
+            method: 'PATCH',
+            url: `/me/messages/${m.id}`,
+            body: { isRead: true },
+          })),
+        );
+        done += page.value.length;
+      }
+      url = page['@odata.nextLink'] ?? null;
+      if (done >= 1000) break;
+    }
+    return done;
+  }
+
+  async emptyFolder(folderId: string, hardDelete: boolean): Promise<number> {
+    let done = 0;
+    let url: string | null =
+      `${GRAPH_BASE_URL}/me/mailFolders/${encodeURIComponent(folderId)}/messages?` +
+      new URLSearchParams({ $select: 'id', $top: '100' }).toString();
+    while (url) {
+      const page: GraphList<{ id: string }> = await this.request('GET', url);
+      if (!page.value.length) break;
+      await this.batch(
+        page.value.map((m) =>
+          hardDelete
+            ? { method: 'DELETE', url: `/me/messages/${m.id}` }
+            : { method: 'POST', url: `/me/messages/${m.id}/move`, body: { destinationId: 'deleteditems' } },
+        ),
+      );
+      done += page.value.length;
+      // Re-fetch first page each time (moving/deleting shifts the collection).
+      url =
+        `${GRAPH_BASE_URL}/me/mailFolders/${encodeURIComponent(folderId)}/messages?` +
+        new URLSearchParams({ $select: 'id', $top: '100' }).toString();
+      if (done >= 2000) break;
+    }
+    return done;
+  }
+
+  async createChildFolder(parentId: string, displayName: string): Promise<MailFolder> {
+    const r = await this.request<RawMailFolder>(
+      'POST',
+      `/me/mailFolders/${encodeURIComponent(parentId)}/childFolders`,
+      { body: { displayName } },
+    );
+    return normalizeMailFolder(r, null, parentId, 0);
+  }
+
+  async renameFolder(folderId: string, displayName: string): Promise<void> {
+    await this.request('PATCH', `/me/mailFolders/${encodeURIComponent(folderId)}`, { body: { displayName } });
+  }
+
+  async deleteFolder(folderId: string): Promise<void> {
+    await this.request('DELETE', `/me/mailFolders/${encodeURIComponent(folderId)}`);
+  }
+
   async listChildFolders(parentId: string, depth: number): Promise<MailFolder[]> {
     const r = await this.request<GraphList<RawMailFolder>>(
       'GET',

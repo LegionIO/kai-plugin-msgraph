@@ -435,6 +435,71 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
         await loadMailList(api, folderId);
         break;
       }
+      case 'mark-folder-read': {
+        const { folderId } = data as { folderId: string };
+        const client = await ensureAuthenticated(false);
+        const n = await client.markFolderRead(folderId);
+        log.info(`mark-folder-read(${folderId}): ${n} messages`);
+        const cur = st(api).mailFolders ?? [];
+        api.state.set('mailFolders', cur.map((f) =>
+          f.id === folderId || f.wellKnownName === folderId ? { ...f, unreadItemCount: 0 } : f,
+        ));
+        updateMailNavBadge(api);
+        if (st(api).activeMailFolder === folderId || (cur.find((f) => f.id === folderId)?.wellKnownName === st(api).activeMailFolder)) {
+          api.state.set('mailList', (st(api).mailList ?? []).map((m) => ({ ...m, isRead: true })));
+        }
+        break;
+      }
+      case 'empty-folder': {
+        const { folderId } = data as { folderId: string };
+        const folder = (st(api).mailFolders ?? []).find((f) => f.id === folderId || f.wellKnownName === folderId);
+        const hardDelete = folder?.wellKnownName === 'deleteditems' || folder?.wellKnownName === 'junkemail';
+        const client = await ensureAuthenticated(false);
+        const n = await client.emptyFolder(folderId, hardDelete);
+        log.info(`empty-folder(${folderId}): ${n} messages ${hardDelete ? 'deleted' : 'moved to Deleted Items'}`);
+        await loadMailFolders(api);
+        if (st(api).activeMailFolder === folderId || st(api).activeMailFolder === folder?.wellKnownName) {
+          await loadMailList(api, st(api).activeMailFolder ?? folderId);
+        }
+        break;
+      }
+      case 'create-folder': {
+        const { parentId, name } = data as { parentId: string; name: string };
+        if (!name.trim()) break;
+        const client = await ensureAuthenticated(false);
+        await client.createChildFolder(parentId, name.trim());
+        // Ensure parent is expanded so the new child shows.
+        const expanded = new Set(st(api).mailFoldersExpanded ?? []);
+        if (!expanded.has(parentId)) {
+          await handleMailAction(api, 'toggle-folder', { folderId: parentId });
+        } else {
+          // Refresh the parent's children.
+          expanded.delete(parentId);
+          api.state.set('mailFoldersExpanded', [...expanded]);
+          api.state.set('mailFolders', (st(api).mailFolders ?? []).filter((f) => f.parentId !== parentId));
+          await handleMailAction(api, 'toggle-folder', { folderId: parentId });
+        }
+        break;
+      }
+      case 'rename-folder': {
+        const { folderId, name } = data as { folderId: string; name: string };
+        if (!name.trim()) break;
+        const client = await ensureAuthenticated(false);
+        await client.renameFolder(folderId, name.trim());
+        api.state.set('mailFolders', (st(api).mailFolders ?? []).map((f) =>
+          f.id === folderId ? { ...f, displayName: name.trim() } : f,
+        ));
+        break;
+      }
+      case 'delete-folder': {
+        const { folderId } = data as { folderId: string };
+        const client = await ensureAuthenticated(false);
+        await client.deleteFolder(folderId);
+        api.state.set('mailFolders', (st(api).mailFolders ?? []).filter((f) => f.id !== folderId && f.parentId !== folderId));
+        if (st(api).activeMailFolder === folderId) await loadMailList(api, 'inbox');
+        void loadMailFolders(api);
+        break;
+      }
       case 'toggle-folder': {
         const { folderId } = data as { folderId: string };
         const expanded = new Set(st(api).mailFoldersExpanded ?? []);

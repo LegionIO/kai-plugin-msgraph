@@ -4,6 +4,7 @@ import { usePanelHeight } from '../hooks.ts';
 import type { MsgraphPluginState, NormalizedMailSummary, MailFolder } from '../../shared/types.ts';
 import { MailBody } from './MailBody.tsx';
 import { MailComposeDialog } from './MailComposeDialog.tsx';
+import { FolderContextMenu } from './FolderContextMenu.tsx';
 import { Avatar } from './Avatar.tsx';
 
 type Props = PluginComponentProps<MsgraphPluginState>;
@@ -36,6 +37,7 @@ export function MailPanelView({ pluginState, onAction }: Props) {
   const s = pluginState ?? ({} as MsgraphPluginState);
   const [panelRef, panelHeight] = usePanelHeight();
   const [search, setSearch] = useState('');
+  const [ctxMenu, setCtxMenu] = useState<{ folder: MailFolder; x: number; y: number } | null>(null);
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const folders = s.mailFolders ?? [];
@@ -164,6 +166,10 @@ export function MailPanelView({ pluginState, onAction }: Props) {
                     expanded={(s.mailFoldersExpanded ?? []).includes(f.id)}
                     onClick={() => { setSearch(''); onAction('select-folder', { folderId: f.wellKnownName ?? f.id }); }}
                     onToggle={() => onAction('toggle-folder', { folderId: f.id })}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCtxMenu({ folder: f, x: e.clientX, y: e.clientY });
+                    }}
                   />
                 ))}
                 {s.loadingMailFolders && folders.length === 0 && (
@@ -242,6 +248,15 @@ export function MailPanelView({ pluginState, onAction }: Props) {
         </div>
       </div>
 
+      {ctxMenu && (
+        <FolderContextMenu
+          folder={ctxMenu.folder}
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          onAction={onAction}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
       {s.composingMail && (
         <MailComposeDialog
           compose={s.composingMail}
@@ -260,12 +275,14 @@ function FolderRow({
   expanded,
   onClick,
   onToggle,
+  onContextMenu,
 }: {
   f: MailFolder;
   active: boolean;
   expanded: boolean;
   onClick: () => void;
   onToggle: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const icon = f.wellKnownName ? FOLDER_ICON[f.wellKnownName] : undefined;
   const hasChildren = f.childFolderCount > 0;
@@ -276,6 +293,7 @@ function FolderRow({
       }`}
       style={{ paddingLeft: 6 + f.depth * 14 }}
       onClick={onClick}
+      onContextMenu={onContextMenu}
     >
       <button
         type="button"
@@ -422,8 +440,11 @@ function MailRowActions({ m, onAction }: { m: NormalizedMailSummary; onAction: P
       </div>
       {label && (
         <span
-          style={{ fontSize: 10, lineHeight: '14px', padding: '2px 6px', borderRadius: 4, whiteSpace: 'nowrap' }}
-          className="bg-foreground text-background shadow-sm"
+          style={{
+            fontSize: 10, lineHeight: '14px', padding: '2px 6px', borderRadius: 4, whiteSpace: 'nowrap',
+            background: '#18181b', color: '#fafafa', border: '1px solid rgba(127,127,127,.3)',
+            boxShadow: '0 4px 12px rgba(0,0,0,.35)',
+          }}
         >
           {label}
         </span>
@@ -553,9 +574,9 @@ function ActionBtn({ title, onClick, children }: { title: string; onClick: () =>
           style={{
             position: 'absolute', top: '100%', right: 0, marginTop: 6, whiteSpace: 'nowrap',
             fontSize: 10, lineHeight: '14px', padding: '3px 7px', borderRadius: 5, zIndex: 20,
-            pointerEvents: 'none',
+            background: '#18181b', color: '#fafafa', border: '1px solid rgba(127,127,127,.3)',
+            boxShadow: '0 4px 12px rgba(0,0,0,.35)', pointerEvents: 'none',
           }}
-          className="bg-foreground text-background shadow-md"
         >
           {title}
         </span>
