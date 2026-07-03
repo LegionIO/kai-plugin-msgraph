@@ -79,51 +79,70 @@ export function MailBody({
   ensureCss();
   ensureHooks();
   const [loadExternal, setLoadExternal] = useState(false);
+  const [blockedCount, setBlockedCount] = useState(0);
   const hostRef = useRef<HTMLDivElement>(null);
-  useEffect(() => setLoadExternal(false), [html]);
+  useEffect(() => { setLoadExternal(false); setBlockedCount(0); }, [html]);
 
-  // Sanitize once per (html, loadExternal). cid: images are tagged as data-cid and
-  // resolved via a DOM patch effect below so incoming inline attachments don't
-  // replace the whole innerHTML (which would drop the user's text selection).
-  const { sanitized, blockedCount } = useMemo(() => {
-    let src = html.replace(
-      /\bsrc\s*=\s*(["'])cid:([^"']+)\1/gi,
-      (_m, q: string, cid: string) => `src=${q}${BLANK_PX}${q} data-cid=${q}${cid.replace(/^<|>$/g, '')}${q}`,
-    );
-    let blocked = 0;
-    if (!loadExternal) {
-      src = src.replace(
-        /(<img\b[^>]*\bsrc\s*=\s*)(["'])(https?:\/\/[^"']+)\2/gi,
-        (_m, pre: string, q: string, url: string) => {
-          blocked++;
-          return `${pre}${q}${BLANK_PX}${q} data-blocked-src=${q}${url}${q}`;
-        },
+  // Sanitize once per message body. All <img> src values are moved to data-src so
+  // nothing loads before we've classified it; the effect below decides per-image.
+  const sanitized = useMemo(() => {
+    const src = html
+      .replace(
+        /(<img\b[^>]*?\bsrc\s*=\s*)(?:(["'])([^"']*)\2|([^\s>]+))/gi,
+        (_m, pre: string, _q, quoted?: string, bare?: string) =>
+          `${pre}"${BLANK_PX}" data-src="${(quoted ?? bare ?? '').replace(/"/g, '&quot;')}"`,
+      )
+      .replace(
+        /\b(background(?:-image)?\s*:\s*)url\((["']?)(https?:\/\/[^)"']+)\2\)/gi,
+        (_m, p: string, q: string, url: string) => `${p}none/*blocked:${url}*/`,
       );
-      src = src.replace(/\b(background(?:-image)?\s*:\s*)url\((["']?)(https?:\/\/[^)"']+)\2\)/gi, (_m, pre: string) => {
-        blocked++;
-        return `${pre}none`;
-      });
-    }
-    const clean = DOMPurify.sanitize(src, {
+    return DOMPurify.sanitize(src, {
       USE_PROFILES: { html: true },
       FORBID_TAGS: ['style', 'script', 'iframe', 'object', 'embed', 'form', 'meta', 'link'],
       FORBID_ATTR: ['onerror', 'onload', 'onclick', 'srcset'],
-      ADD_ATTR: ['data-blocked-src', 'data-cid'],
+      ADD_ATTR: ['data-src'],
       ALLOW_DATA_ATTR: false,
     });
-    return { sanitized: clean, blockedCount: blocked };
-  }, [html, loadExternal]);
+  }, [html]);
 
-  // Patch cid: images in place as their bytes arrive — no innerHTML churn.
+  // Write innerHTML imperatively and only when the sanitized string actually
+  // differs, then classify each <img> in place: cid: → inline attachment,
+  // http(s) → gated behind loadExternal, everything else (data:, relative) → allow.
+  // React re-renders from unrelated state churn never touch this subtree, so text
+  // selection survives.
+  const lastHtmlRef = useRef<string | null>(null);
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    host.querySelectorAll<HTMLImageElement>('img[data-cid]').forEach((img) => {
-      const cid = img.getAttribute('data-cid') ?? '';
-      const url = inlineAttachments[cid] ?? inlineAttachments[`<${cid}>`];
-      if (url && img.src !== url) img.src = url;
+    if (lastHtmlRef.current !== sanitized) {
+      host.innerHTML = sanitized;
+      lastHtmlRef.current = sanitized;
+    }
+    let blocked = 0;
+    host.querySelectorAll<HTMLImageElement>('img[data-src]').forEach((img) => {
+      const orig = img.getAttribute('data-src') ?? '';
+      let target: string | null = null;
+      const cidMatch = /^cid:(.+)$/i.exec(orig);
+      if (cidMatch) {
+        const key = cidMatch[1].replace(/^<|>$/g, '');
+        target = inlineAttachments[key] ?? inlineAttachments[`<${key}>`] ?? null;
+      } else if (isExternal(orig)) {
+        if (loadExternal) target = orig;
+        else blocked++;
+      } else if (orig) {
+        target = orig;
+      }
+      if (target && img.getAttribute('src') !== target) img.src = target;
     });
-  }, [sanitized, inlineAttachments]);
+    host.querySelectorAll<HTMLElement>('[style*="/*blocked:"]').forEach((el) => {
+      if (loadExternal) {
+        el.setAttribute('style', (el.getAttribute('style') ?? '').replace(/none\/\*blocked:([^*]+)\*\//g, 'url("$1")'));
+      } else {
+        blocked++;
+      }
+    });
+    setBlockedCount((prev) => (prev === blocked ? prev : blocked));
+  });
 
   return (
     <>
@@ -152,7 +171,6 @@ export function MailBody({
             if (isExternal(href) || href.startsWith('mailto:')) onOpenLink(href);
           }
         }}
-        dangerouslySetInnerHTML={{ __html: sanitized }}
       />
     </>
   );
