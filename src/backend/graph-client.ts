@@ -329,7 +329,14 @@ export class GraphClient {
   }
 
   async deleteMessage(chatId: string, messageId: string): Promise<void> {
-    await this.request<void>('POST', `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/softDelete`, {
+    // softDelete is only routed under /me (or /users/{id}); bare /chats/... 405s.
+    await this.request<void>('POST', `/me/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/softDelete`, {
+      body: {},
+    });
+  }
+
+  async undeleteMessage(chatId: string, messageId: string): Promise<void> {
+    await this.request<void>('POST', `/me/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/undoSoftDelete`, {
       body: {},
     });
   }
