@@ -157,15 +157,45 @@ export async function getBotProfiles(api: PluginAPI, botIds: string[]): Promise<
 }
 
 export async function getBotIcon(api: PluginAPI, botId: string): Promise<string | null> {
-  const [{ middleTier }, tok] = await Promise.all([ensureRegion(api), spacesToken(api)]);
+  const [{ middleTier, skypeToken }, tok] = await Promise.all([ensureRegion(api), spacesToken(api)]);
+  const asDataUrl = (r: Response, buf: Buffer) =>
+    `data:${r.headers.get('content-type') || 'image/png'};base64,${buf.toString('base64')}`;
+  // MT profilepicturev2/28:{id} returns Teams' generic hexagon placeholder for
+  // bots; the real app icon is fetchShortProfile.imageUri on asyncgw (AMS),
+  // which authenticates with the skype token.
+  try {
+    const p = await api.fetch(
+      `${middleTier}/beta/users/fetchShortProfile?isMailAddress=false&includeBots=true`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${tok}`,
+          'content-type': 'application/json;charset=UTF-8',
+          'x-ms-client-type': 'cdlworker',
+        },
+        body: JSON.stringify([`28:${botId}`]),
+      },
+    );
+    if (p.ok) {
+      const j = (await p.json()) as { value?: Array<{ imageUri?: string }> };
+      const uri = j.value?.[0]?.imageUri;
+      if (uri && skypeToken && trustedUrl(uri, '') === uri) {
+        const ir = await api.fetch(uri, { headers: { Authorization: `skype_token ${skypeToken}` } });
+        if (ir.ok) {
+          const buf = Buffer.from(await ir.arrayBuffer());
+          if (buf.length > 0) return asDataUrl(ir, buf);
+        }
+      }
+    }
+  } catch { /* fall through */ }
   const myId = tokenCache.getObjectId();
-  const url = `${middleTier}/beta/users/${myId}/profilepicturev2/${encodeURIComponent(`28:${botId}`)}?size=HR64x64`;
-  const resp = await api.fetch(url, { headers: { Authorization: `Bearer ${tok}` } });
+  const resp = await api.fetch(
+    `${middleTier}/beta/users/${myId}/profilepicturev2/${encodeURIComponent(`28:${botId}`)}?size=HR64x64`,
+    { headers: { Authorization: `Bearer ${tok}` } },
+  );
   if (!resp.ok) return null;
   const buf = Buffer.from(await resp.arrayBuffer());
-  if (buf.length === 0) return null;
-  const ct = resp.headers.get('content-type') || 'image/jpeg';
-  return `data:${ct};base64,${buf.toString('base64')}`;
+  return buf.length ? asDataUrl(resp, buf) : null;
 }
 
 export function ic3Token(api: PluginAPI): Promise<string> {
