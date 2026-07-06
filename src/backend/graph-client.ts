@@ -895,7 +895,7 @@ function stripHtml(html: string): string {
 }
 
 export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat {
-  const members = (c.members ?? [])
+  const members: NormalizedChat['members'] = (c.members ?? [])
     .filter((m) => m.userId && m.userId !== myId)
     .map((m) => ({
       id: m.userId!,
@@ -903,6 +903,14 @@ export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat
       email: m.email ?? null,
     }))
     .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id));
+  // Bot 1:1 chats: Graph omits the bot from `members` entirely (only the human
+  // user is listed). Synthesize a bot member from lastMessagePreview.from so the
+  // sidebar/header have something to render; the friendly name & icon are
+  // resolved later via Teams MT (see enrichBotChats in index.ts).
+  const lpApp = c.lastMessagePreview?.from?.application;
+  if (members.length === 0 && c.chatType === 'oneOnOne' && lpApp?.id) {
+    members.push({ id: lpApp.id, displayName: lpApp.displayName ?? 'Bot', email: null, isBot: true });
+  }
   const lp = c.lastMessagePreview;
   const rawBody = lp?.body?.content ?? '';
   const lastMsgAt = lp?.createdDateTime ?? null;

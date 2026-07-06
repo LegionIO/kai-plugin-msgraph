@@ -35,6 +35,7 @@ export const OWA_SERVICE_URL = 'https://outlook.office.com/owa/service.svc';
 export const TEAMS_AUTHSVC_URL       = 'https://teams.microsoft.com/api/authsvc/v1.0/authz';
 export const TEAMS_CHATSVC_FALLBACK  = 'https://teams.microsoft.com/api/chatsvc/amer';
 export const TEAMS_UPS_FALLBACK      = 'https://teams.microsoft.com/ups/noam';
+export const TEAMS_MT_FALLBACK       = 'https://teams.microsoft.com/api/mt/part/amer-03';
 export const TEAMS_REGISTRAR_FALLBACK = 'https://teams.microsoft.com/registrar/prod/V2/registrations';
 export const TROUTER_CONNECT_URL     = 'wss://go.trouter.teams.microsoft.com/v4/c';
 export const TROUTER_CLIENT_VERSION  = '2026.20.01.1';

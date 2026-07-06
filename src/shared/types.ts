@@ -119,7 +119,7 @@ export interface NormalizedChat {
   id: string;
   type: GraphChatType;
   topic: string | null;
-  members: Array<{ id: string; displayName: string; email: string | null }>;
+  members: Array<{ id: string; displayName: string; email: string | null; isBot?: boolean }>;
   lastUpdated: string | null;
   lastMessagePreview: string | null;
   lastMessageFrom: string | null;

@@ -513,14 +513,19 @@ export function PanelView({ pluginState, onAction }: Props) {
                     id={activeChat.members[0].id}
                     name={activeChat.members[0].displayName}
                     photo={photos[activeChat.members[0].id]}
-                    presence={presence[activeChat.members[0].id]}
+                    presence={activeChat.members[0].isBot ? undefined : presence[activeChat.members[0].id]}
                     size={9}
                   />
                 ) : (
                   <AvatarStack members={activeChat.members} photos={photos} presence={presence} />
                 )}
                 <div className="min-w-0">
-                  <div className="text-sm font-semibold text-foreground truncate">{chatTitle(activeChat)}</div>
+                  <div className="text-sm font-semibold text-foreground truncate flex items-center gap-1.5">
+                    {chatTitle(activeChat)}
+                    {activeChat.members[0]?.isBot && (
+                      <span className="px-1 py-[1px] rounded text-[9px] font-medium leading-none border border-border text-muted-foreground">BOT</span>
+                    )}
+                  </div>
                   <div className="text-[10px] text-muted-foreground truncate">
                     {activeChat.type} · {activeChat.members.length} member{activeChat.members.length === 1 ? '' : 's'}
                   </div>
@@ -945,7 +950,7 @@ function ChatRow({
           id={chat.members[0].id}
           name={chat.members[0].displayName}
           photo={photos[chat.members[0].id]}
-          presence={presence[chat.members[0].id]}
+          presence={chat.members[0].isBot ? undefined : presence[chat.members[0].id]}
         />
       ) : (
         <AvatarStack members={chat.members} photos={photos} presence={presence} max={2} />

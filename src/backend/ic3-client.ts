@@ -27,6 +27,7 @@ import {
   TEAMS_CHATSVC_FALLBACK,
   TEAMS_UPS_FALLBACK,
   TEAMS_REGISTRAR_FALLBACK,
+  TEAMS_MT_FALLBACK,
 } from '../shared/constants.js';
 import type { PluginAPI } from '../shared/types.js';
 import { acquireFociAccessToken } from './auth.js';
@@ -37,6 +38,7 @@ export interface IC3Region {
   chatServiceAfd: string;
   presenceUPS: string;
   registrarUrl: string;
+  middleTier: string;
   skypeToken: string | null;
   expiresAt: number;
   session: number;
@@ -78,6 +80,7 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
   let chatServiceAfd = TEAMS_CHATSVC_FALLBACK;
   let presenceUPS = TEAMS_UPS_FALLBACK;
   let registrarUrl = TEAMS_REGISTRAR_FALLBACK;
+  let middleTier = TEAMS_MT_FALLBACK;
   let skypeToken: string | null = null;
   let ttlMs = 30 * 60_000;
   try {
@@ -93,12 +96,15 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
           chatService?: string;
           presenceUPS?: string;
           calling_registrarUrl?: string;
+          middleTier?: string;
+          mtImageService?: string;
         };
       };
       const g = j.regionGtms ?? {};
       chatServiceAfd = trustedUrl(g.chatServiceAfd || g.chatService, TEAMS_CHATSVC_FALLBACK);
       presenceUPS = trustedUrl(g.presenceUPS, TEAMS_UPS_FALLBACK);
       registrarUrl = trustedUrl(g.calling_registrarUrl, TEAMS_REGISTRAR_FALLBACK);
+      middleTier = trustedUrl(g.middleTier || g.mtImageService, TEAMS_MT_FALLBACK);
       skypeToken = j.tokens?.skypeToken ?? null;
       if (typeof j.tokens?.expiresIn === 'number') ttlMs = Math.max(5 * 60_000, j.tokens.expiresIn * 1000 - 60_000);
     } else {
@@ -107,8 +113,59 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
   } catch (err) {
     getLogger().warn(`IC3 authz failed (${err}); using fallback region`);
   }
-  region = { chatServiceAfd, presenceUPS, registrarUrl, skypeToken, expiresAt: Date.now() + ttlMs, session };
+  region = { chatServiceAfd, presenceUPS, registrarUrl, middleTier, skypeToken, expiresAt: Date.now() + ttlMs, session };
   return region;
+}
+
+function spacesToken(api: PluginAPI): Promise<string> {
+  return acquireFociAccessToken(api, CLIENT_ID_TEAMS, SPACES_SCOPE);
+}
+
+export interface BotProfile { displayName: string; description: string | null }
+
+/**
+ * Resolve friendly display names for bots via Teams middle-tier fetchShortProfile.
+ * Graph's `from.application.displayName` is the Azure Bot resource name (e.g.
+ * "ucap-smartbot-prod-rg-smartbot"); this returns the Teams-app display name
+ * (e.g. "SmartBot"), which is what the Teams client shows.
+ */
+export async function getBotProfiles(api: PluginAPI, botIds: string[]): Promise<Map<string, BotProfile>> {
+  const out = new Map<string, BotProfile>();
+  if (botIds.length === 0) return out;
+  const [{ middleTier }, tok] = await Promise.all([ensureRegion(api), spacesToken(api)]);
+  const resp = await api.fetch(
+    `${middleTier}/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&includeBots=true`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${tok}`,
+        'content-type': 'application/json;charset=UTF-8',
+        'x-ms-client-type': 'cdlworker',
+        'x-ms-client-version': '1415/26052906121',
+      },
+      body: JSON.stringify(botIds.map((id) => `28:${id}`)),
+    },
+  );
+  if (!resp.ok) throw new Error(`fetchShortProfile → ${resp.status}`);
+  const j = (await resp.json()) as { value?: Array<{ mri?: string; displayName?: string; givenName?: string; description?: string }> };
+  for (const p of j.value ?? []) {
+    const id = p.mri?.replace(/^28:/, '');
+    const name = p.displayName || p.givenName;
+    if (id && name) out.set(id, { displayName: name, description: p.description ?? null });
+  }
+  return out;
+}
+
+export async function getBotIcon(api: PluginAPI, botId: string): Promise<string | null> {
+  const [{ middleTier }, tok] = await Promise.all([ensureRegion(api), spacesToken(api)]);
+  const myId = tokenCache.getObjectId();
+  const url = `${middleTier}/beta/users/${myId}/profilepicturev2/${encodeURIComponent(`28:${botId}`)}?size=HR64x64`;
+  const resp = await api.fetch(url, { headers: { Authorization: `Bearer ${tok}` } });
+  if (!resp.ok) return null;
+  const buf = Buffer.from(await resp.arrayBuffer());
+  if (buf.length === 0) return null;
+  const ct = resp.headers.get('content-type') || 'image/jpeg';
+  return `data:${ct};base64,${buf.toString('base64')}`;
 }
 
 export function ic3Token(api: PluginAPI): Promise<string> {

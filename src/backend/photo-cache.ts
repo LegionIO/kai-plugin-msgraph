@@ -1,6 +1,7 @@
 import type { PluginAPI } from '../shared/types.js';
 import { GraphApiError } from '../shared/types.js';
 import { GraphClient } from './graph-client.js';
+import { getBotIcon } from './ic3-client.js';
 import * as tokenCache from './token-cache.js';
 import { DiskCache } from './disk-cache.js';
 import * as mediaServer from './media-server.js';
@@ -79,7 +80,7 @@ export function ensure(api: PluginAPI, client: GraphClient, userIds: Iterable<st
 
 /** Fetch bot/app icons into the same photos map, keyed by application id. */
 export function ensureApps(api: PluginAPI, client: GraphClient, appIds: Iterable<string>): void {
-  ensureWith(api, appIds, (id) => client.getAppIcon(id));
+  ensureWith(api, appIds, async (id) => (await getBotIcon(api, id)) ?? (await client.getAppIcon(id)));
 }
 
 function ensureWith(

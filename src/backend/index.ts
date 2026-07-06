@@ -37,6 +37,7 @@ import {
   sendTyping,
   sendClearTyping,
   clearTypingThrottle,
+  getBotProfiles,
   type UpsAvailability,
 } from './ic3-client.js';
 import { TrouterListener, type TrouterEvent } from './trouter.js';
@@ -56,6 +57,7 @@ import {
 import type {
   PluginAPI,
   MsgraphPluginState,
+  NormalizedChat,
   UserPreferences,
   ToolPermissions,
   MfaState,
@@ -251,6 +253,50 @@ async function refreshMeProfile(api: PluginAPI): Promise<void> {
 
 // ── Data loaders ──
 
+const botNames = new Map<string, string>();
+
+function applyBotNames<T extends { fromApp?: boolean; fromId: string | null; fromName: string | null }>(msgs: T[]): T[] {
+  if (botNames.size === 0) return msgs;
+  return msgs.map((m) =>
+    m.fromApp && m.fromId && botNames.has(m.fromId) ? { ...m, fromName: botNames.get(m.fromId)! } : m,
+  );
+}
+
+function applyBotNamesToChats(chats: NormalizedChat[]): NormalizedChat[] {
+  if (botNames.size === 0) return chats;
+  return chats.map((c) => {
+    const b = c.members.find((m) => m.isBot && botNames.has(m.id));
+    if (!b) return c;
+    const name = botNames.get(b.id)!;
+    return {
+      ...c,
+      topic: c.topic && c.topic !== b.displayName ? c.topic : name,
+      lastMessageFrom: c.lastMessageFrom === b.displayName ? name : c.lastMessageFrom,
+      members: c.members.map((m) => (m.id === b.id ? { ...m, displayName: name } : m)),
+    };
+  });
+}
+
+async function resolveBotNames(api: PluginAPI, botIds: Set<string>): Promise<void> {
+  const need = [...botIds].filter((id) => !botNames.has(id));
+  if (!need.length) return;
+  const session = tokenCache.currentSession();
+  try {
+    const profiles = await getBotProfiles(api, need);
+    for (const [id, p] of profiles) botNames.set(id, p.displayName);
+  } catch (err) {
+    getLogger().warn(`bot profile lookup failed: ${err}`);
+    return;
+  }
+  if (session !== tokenCache.currentSession()) return;
+  const cur = (api.state.get() as Partial<MsgraphPluginState>).chats;
+  if (cur?.length) api.state.set('chats', applyBotNamesToChats(cur));
+  const active = (api.state.get() as Partial<MsgraphPluginState>).activeChatMessages;
+  if (active?.some((m) => m.fromApp && m.fromId && botIds.has(m.fromId))) {
+    api.state.set('activeChatMessages', applyBotNames(active));
+  }
+}
+
 async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void> {
   if (!tokenCache.hasRefreshToken() && !tokenCache.isTokenValid()) return;
   const session = tokenCache.currentSession();
@@ -261,7 +307,7 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
     const { chats: raw, nextLink } = await client.listChats({});
     if (session !== tokenCache.currentSession()) return;
     const myId = tokenCache.getObjectId();
-    const page1 = raw.map((c) => normalizeChat(c, myId));
+    const page1 = applyBotNamesToChats(raw.map((c) => normalizeChat(c, myId)));
     const prev = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
     // Preserve already-loaded tail so a periodic refresh of page 1 doesn't shrink the list.
     const p1Ids = new Set(page1.map((c) => c.id));
@@ -270,11 +316,16 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
     api.state.set('chatsNextLink', nextLink);
     updateNavBadge(api);
     const ids = new Set<string>();
+    const botIds = new Set<string>();
     if (myId) ids.add(myId);
-    for (const c of page1) for (const m of c.members) ids.add(m.id);
+    for (const c of page1) for (const m of c.members) (m.isBot ? botIds : ids).add(m.id);
     photoCache.ensure(api, client, ids);
     presenceCache.refresh(api, client, ids);
     trouter?.subscribePresence(ids);
+    if (botIds.size) {
+      photoCache.ensureApps(api, client, botIds);
+      void resolveBotNames(api, botIds);
+    }
 
     // Background: page to the end (once) so member-based search is complete.
     if (
@@ -294,8 +345,16 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
             if (session !== tokenCache.currentSession()) return;
             const cur = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
             const seen = new Set(cur.map((c) => c.id));
-            const add = more.map((c) => normalizeChat(c, myId)).filter((c) => !seen.has(c.id));
-            if (add.length) api.state.set('chats', [...cur, ...add]);
+            const add = applyBotNamesToChats(more.map((c) => normalizeChat(c, myId))).filter((c) => !seen.has(c.id));
+            if (add.length) {
+              api.state.set('chats', [...cur, ...add]);
+              const pageBots = new Set<string>();
+              for (const c of add) for (const m of c.members) if (m.isBot) pageBots.add(m.id);
+              if (pageBots.size) {
+                photoCache.ensureApps(api, client, pageBots);
+                void resolveBotNames(api, pageBots);
+              }
+            }
             api.state.set('chatsNextLink', nl);
             link = nl;
             pages++;
@@ -337,10 +396,9 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
     const { messages: msgs, nextLink } = await client.getChatMessages(chatId, 40);
     if (seq !== messageLoadSeq) return;
     const myId = tokenCache.getObjectId();
-    const normalized = msgs
-      .map((m) => normalizeMessage(m, myId))
-      .filter((m) => !m.deleted)
-      .reverse();
+    const normalized = applyBotNames(
+      msgs.map((m) => normalizeMessage(m, myId)).filter((m) => !m.deleted).reverse(),
+    );
     api.state.set('activeChatMessages', normalized);
     api.state.set('activeChatMessagesNextLink', nextLink);
     threadCache?.set(chatId, normalized);
@@ -658,14 +716,16 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           const myId = tokenCache.getObjectId();
           const existing = (api.state.get() as Partial<MsgraphPluginState>).chats ?? [];
           const seen = new Set(existing.map((c) => c.id));
-          const more = raw.map((c) => normalizeChat(c, myId)).filter((c) => !seen.has(c.id));
+          const more = applyBotNamesToChats(raw.map((c) => normalizeChat(c, myId))).filter((c) => !seen.has(c.id));
           api.state.set('chats', [...existing, ...more]);
           api.state.set('chatsNextLink', nextLink);
           updateNavBadge(api);
           const ids = new Set<string>();
-          for (const c of more) for (const m of c.members) ids.add(m.id);
+          const bots = new Set<string>();
+          for (const c of more) for (const m of c.members) (m.isBot ? bots : ids).add(m.id);
           photoCache.ensure(api, client, ids);
           presenceCache.refresh(api, client, ids);
+          if (bots.size) { photoCache.ensureApps(api, client, bots); void resolveBotNames(api, bots); }
     trouter?.subscribePresence(ids);
         } finally {
           api.state.set('loadingMoreChats', false);
@@ -724,13 +784,15 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
 
           if (seq !== remoteSearchSeq) return;
           const seen = new Set<string>();
-          const results = rawChats
-            .map((c) => normalizeChat(c, myId))
-            .filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)))
-            .sort((a, b) => (b.lastUpdated ?? '').localeCompare(a.lastUpdated ?? ''));
+          const results = applyBotNamesToChats(
+            rawChats
+              .map((c) => normalizeChat(c, myId))
+              .filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)))
+              .sort((a, b) => (b.lastUpdated ?? '').localeCompare(a.lastUpdated ?? '')),
+          );
           api.state.set('remoteSearch', { query: q, loading: false, results });
           const ids = new Set<string>();
-          for (const c of results) for (const m of c.members) ids.add(m.id);
+          for (const c of results) for (const m of c.members) if (!m.isBot) ids.add(m.id);
           photoCache.ensure(api, client, ids);
           presenceCache.refresh(api, client, ids);
     trouter?.subscribePresence(ids);
