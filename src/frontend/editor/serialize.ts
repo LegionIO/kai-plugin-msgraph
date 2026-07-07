@@ -12,6 +12,7 @@ import { $isLinkNode } from '@lexical/link';
 import { $isListNode, $isListItemNode } from '@lexical/list';
 import { $isMentionNode, $isImageNode, pendingImageFiles } from './nodes.tsx';
 import type { OutgoingMention } from '../../shared/markdown.ts';
+import { safeUrl, safeImageUrl } from '../../shared/markdown.ts';
 import { fileToBase64 } from '../components/NewChatDialog.tsx';
 
 const esc = (s: string) =>
@@ -20,6 +21,8 @@ const esc = (s: string) =>
 interface Ctx {
   mentions: OutgoingMention[];
   images: Array<{ tempId: string; contentType: string }>;
+  /** Count of already-uploaded (existing Graph) images referenced by the body. */
+  existingImages: number;
 }
 
 function textNodeHtml(node: LexicalNode): string {
@@ -48,7 +51,12 @@ function inlineHtml(node: LexicalNode, ctx: Ctx): string {
   if ($isImageNode(node)) {
     const existing = node.getExistingUrl();
     if (existing) {
-      return `<img src="${esc(existing)}" style="max-width:100%">`;
+      // Gate via the image-specific allowlist (https/http/relative/cid), matching
+      // inbound <img> parsing and outbound markdown images; unsafe → drop it.
+      const safe = safeImageUrl(existing);
+      if (!safe) return '';
+      ctx.existingImages += 1; // count so an existing-image-only edit isn't "empty"
+      return `<img src="${esc(safe)}" style="max-width:100%">`;
     }
     const tempId = node.getTempId();
     ctx.images.push({ tempId, contentType: node.getContentType() });
@@ -56,7 +64,13 @@ function inlineHtml(node: LexicalNode, ctx: Ctx): string {
   }
   if ($isLinkNode(node)) {
     const inner = node.getChildren().map((c) => inlineHtml(c, ctx)).join('');
-    return `<a href="${esc(node.getURL())}">${inner}</a>`;
+    // Gate the URL scheme (parity with the markdown path); an unsafe scheme
+    // (javascript:, data:, …) → render only the inner text, no href.
+    const safe = safeUrl(node.getURL());
+    // Only emit a clickable link for openable schemes (parity with the markdown
+    // path); relative/anchor targets can't resolve from a chat message.
+    const openable = safe && /^(https?:|mailto:|tel:)/i.test(safe);
+    return openable ? `<a href="${esc(safe)}">${inner}</a>` : inner;
   }
   if ($isElementNode(node)) {
     return node.getChildren().map((c) => inlineHtml(c, ctx)).join('');
@@ -96,7 +110,7 @@ export async function serializeToTeams(
   editor: LexicalEditor,
 ): Promise<{ payload: SerializedPayload; isEmpty: boolean }> {
   const { html, plain, ctx, simple } = editor.getEditorState().read(() => {
-    const c: Ctx = { mentions: [], images: [] };
+    const c: Ctx = { mentions: [], images: [], existingImages: 0 };
     const root = $getRoot();
     const blocks = root.getChildren();
     const plainText = root.getTextContent();
@@ -109,7 +123,7 @@ export async function serializeToTeams(
     return { payload: { body: { contentType: 'text', content: plain } }, isEmpty: false };
   }
 
-  const isEmpty = !plain.trim() && ctx.images.length === 0;
+  const isEmpty = !plain.trim() && ctx.images.length === 0 && ctx.existingImages === 0;
   const payload: SerializedPayload = { body: { contentType: 'html', content: html } };
   if (ctx.mentions.length) payload.mentions = ctx.mentions;
   if (ctx.images.length) {
@@ -137,7 +151,7 @@ export interface SerializedMail {
 
 export async function serializeToMail(editor: LexicalEditor): Promise<SerializedMail> {
   const { html, plain, ctx } = editor.getEditorState().read(() => {
-    const c: Ctx = { mentions: [], images: [] };
+    const c: Ctx = { mentions: [], images: [], existingImages: 0 };
     const root = $getRoot();
     const h = root.getChildren().map((b) => blockHtml(b, c)).join('');
     return { html: h, plain: root.getTextContent(), ctx: c };
@@ -158,7 +172,7 @@ export async function serializeToMail(editor: LexicalEditor): Promise<Serialized
       contentBytes: await fileToBase64(file),
     });
   }
-  return { html: rewritten, inlineImages, isEmpty: !plain.trim() && ctx.images.length === 0 };
+  return { html: rewritten, inlineImages, isEmpty: !plain.trim() && ctx.images.length === 0 && ctx.existingImages === 0 };
 }
 
 function ctxProbeSimple(node: LexicalNode | undefined): boolean {

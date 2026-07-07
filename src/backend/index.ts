@@ -41,7 +41,7 @@ import {
   type UpsAvailability,
 } from './ic3-client.js';
 import { TrouterListener, type TrouterEvent } from './trouter.js';
-import { buildMessageBody, withMessageRef, type PendingImage } from '../shared/markdown.js';
+import { buildMessageBody, withMessageRef, escAttr, type PendingImage } from '../shared/markdown.js';
 import { DiskCache } from './disk-cache.js';
 import { buildMsgraphTools, ALL_TOOL_NAMES } from './tools.js';
 import { setLogger, getLogger } from './logger-singleton.js';
@@ -1067,13 +1067,17 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         // Re-attach original attachments (cards, files, message refs) with their <attachment> markers.
         const markers = (ed.attachments ?? [])
           .filter((a) => a.id)
-          .map((a) => `<attachment id="${a.id}"></attachment>`)
+          .map((a) => `<attachment id="${escAttr(String(a.id))}"></attachment>`)
           .join('');
         let content = payload.body.content;
         let contentType: 'text' | 'html' = payload.body.contentType;
         if (markers) {
           if (contentType === 'text') {
-            content = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            content = content
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/\n/g, '<br>');
             contentType = 'html';
           }
           content += markers;
@@ -1096,10 +1100,21 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         break;
       }
       case 'edit-message': {
-        const { chatId, messageId, text } = data as { chatId: string; messageId: string; text: string };
+        const { chatId, messageId, text, contentType } = data as {
+          chatId: string;
+          messageId: string;
+          text: string;
+          contentType?: 'text' | 'html';
+        };
         const client = await ensureAuthenticated(api);
-        const p = buildMessageBody(text);
-        await client.editMessage(chatId, messageId, { body: p.body });
+        const p = contentType
+          ? { body: { contentType, content: text } as { contentType: 'text' | 'html'; content: string }, mentions: undefined, hostedContents: undefined }
+          : buildMessageBody(text);
+        await client.editMessage(chatId, messageId, {
+          body: p.body,
+          ...(p.mentions ? { mentions: p.mentions } : {}),
+          ...(p.hostedContents ? { hostedContents: p.hostedContents } : {}),
+        });
         if ((api.state.get() as Partial<MsgraphPluginState>).activeChatId === chatId) {
           await loadMessages(api, chatId);
         }
@@ -1339,7 +1354,15 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         let ok = false;
         try {
           const u = new URL(url);
-          ok = u.protocol === 'https:' || u.protocol === 'http:' || u.protocol === 'mailto:';
+          // Allow the same externally-openable schemes the markdown sanitizer
+          // (safeUrl) can emit, so generated links actually open after reload.
+          // (Relative/anchor URLs throw in `new URL` with no base → refused,
+          // which is correct: they have no external target.)
+          ok =
+            u.protocol === 'https:' ||
+            u.protocol === 'http:' ||
+            u.protocol === 'mailto:' ||
+            u.protocol === 'tel:';
         } catch { /* invalid */ }
         if (!ok) throw new Error(`Refusing to open URL with unsupported scheme: ${url}`);
         await api.shell.openExternal(url);

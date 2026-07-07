@@ -322,7 +322,16 @@ export class GraphClient {
     });
   }
 
-  async editMessage(chatId: string, messageId: string, payload: { body: { contentType: 'text' | 'html'; content: string } }): Promise<void> {
+  async editMessage(
+    chatId: string,
+    messageId: string,
+    payload: {
+      body: { contentType: 'text' | 'html'; content: string };
+      mentions?: unknown[];
+      hostedContents?: unknown[];
+      attachments?: unknown[];
+    },
+  ): Promise<void> {
     await this.request<void>('PATCH', `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
       body: payload,
     });

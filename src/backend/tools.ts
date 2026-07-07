@@ -440,13 +440,18 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
     {
       name: 'edit-message',
       description:
-        "Edit one of the signed-in user's own messages. Markdown/mention syntax is supported (same as send-message).",
+        "Edit one of the signed-in user's own messages. Markdown/mention syntax is supported (same as send-message). Pass contentType: 'html' to send a raw HTML body verbatim (for links, <br>, etc.).",
       inputSchema: {
         type: 'object',
         properties: {
           chatId: { type: 'string' },
           messageId: { type: 'string' },
           text: { type: 'string' },
+          contentType: {
+            type: 'string',
+            enum: ['text', 'html'],
+            description: 'Force a specific body content type. Omit to auto-detect markdown / mentions.',
+          },
         },
         required: ['chatId', 'messageId', 'text'],
         additionalProperties: false,
@@ -454,9 +459,20 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       execute: async (input) => {
         try {
           const client = await ensureAuthenticated();
-          const { chatId, messageId, text } = input as { chatId: string; messageId: string; text: string };
-          const p = buildMessageBody(text);
-          await client.editMessage(chatId, messageId, { body: p.body });
+          const { chatId, messageId, text, contentType } = input as {
+            chatId: string;
+            messageId: string;
+            text: string;
+            contentType?: 'text' | 'html';
+          };
+          const p = contentType
+            ? { body: { contentType, content: text } as { contentType: 'text' | 'html'; content: string }, mentions: undefined, hostedContents: undefined }
+            : buildMessageBody(text);
+          await client.editMessage(chatId, messageId, {
+            body: p.body,
+            ...(p.mentions ? { mentions: p.mentions } : {}),
+            ...(p.hostedContents ? { hostedContents: p.hostedContents } : {}),
+          });
           return { success: true, chatId, messageId };
         } catch (err) {
           return errResult(err);
