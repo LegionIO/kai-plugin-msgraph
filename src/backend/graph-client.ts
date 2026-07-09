@@ -68,8 +68,10 @@ export class GraphClient {
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
 
+    const safePath = path.replace(/\?.*$/, '');
+
     if (resp.status === 401 && !retried) {
-      getLogger().warn(`Graph 401 on ${method} ${path}; refreshing and retrying once`);
+      getLogger().warn(`Graph 401 on ${method} ${safePath}; refreshing and retrying once`);
       try {
         await forceRefresh(this.api);
       } catch (err) {
@@ -86,7 +88,7 @@ export class GraphClient {
     if (!resp.ok) {
       const msg = (body as { error?: { code?: string; message?: string } } | undefined)?.error;
       throw new GraphApiError(
-        `${method} ${path} → ${resp.status} ${msg?.code ?? ''} ${msg?.message ?? resp.statusText}`.trim(),
+        `${method} ${safePath} → ${resp.status} ${msg?.code ?? ''} ${msg?.message ?? resp.statusText}`.trim(),
         resp.status,
         body,
       );
@@ -508,10 +510,10 @@ export class GraphClient {
 
   // ── Mail (Outlook) ──
 
-  async listMailFolders(): Promise<MailFolder[]> {
-    const [all, ...wk] = await Promise.all([
+  async listMailFolders(): Promise<{ folders: MailFolder[]; truncated: boolean }> {
+    const [first, ...wk] = await Promise.all([
       this.request<GraphList<RawMailFolder>>('GET', '/me/mailFolders', {
-        query: { $top: '50', $select: MAIL_FOLDER_SELECT },
+        query: { $top: '100', $select: MAIL_FOLDER_SELECT },
       }),
       ...(['inbox', 'drafts', 'sentitems', 'archive', 'deleteditems', 'junkemail'] as const).map((n) =>
         this.request<{ id: string }>('GET', `/me/mailFolders/${n}`, { query: { $select: 'id' } })
@@ -519,9 +521,92 @@ export class GraphClient {
           .catch(() => null),
       ),
     ]);
+    const raw = [...first.value];
+    let next = first['@odata.nextLink'] ?? null;
+    let i = 0;
+    for (; next && i < 20; i++) {
+      const page = await this.request<GraphList<RawMailFolder>>('GET', next);
+      raw.push(...page.value);
+      next = page['@odata.nextLink'] ?? null;
+    }
     const idToWk = new Map<string, string>();
     for (const x of wk) if (x) idToWk.set(x.id, x.name);
-    return all.value.map((f) => normalizeMailFolder(f, idToWk.get(f.id) ?? null, null, 0));
+    return {
+      folders: raw.map((f) => normalizeMailFolder(f, idToWk.get(f.id) ?? null, null, 0)),
+      truncated: next != null,
+    };
+  }
+
+  /**
+   * All mail folders, descending up to `maxDepth` levels of children. Child-listing
+   * errors propagate (fail closed) so name-resolution ambiguity checks see the full
+   * set rather than silently missing a folder that shares a display name. `truncated`
+   * is true when the depth cap left unexplored children — callers must not treat a
+   * name match as authoritative in that case.
+   */
+  async listMailFoldersDeep(maxDepth = 3): Promise<{ folders: MailFolder[]; truncated: boolean }> {
+    const top = await this.listMailFolders();
+    const out = [...top.folders];
+    let truncated = top.truncated;
+    let frontier = out.filter((f) => f.childFolderCount > 0);
+    for (let depth = 1; depth <= maxDepth && frontier.length; depth++) {
+      const pages = await mapLimit(frontier, 5, (f) => this.listChildFoldersPaged(f.id, depth));
+      const kids = pages.flatMap((p) => p.folders);
+      if (pages.some((p) => p.truncated)) truncated = true;
+      out.push(...kids);
+      if (depth < maxDepth) {
+        frontier = kids.filter((f) => f.childFolderCount > 0);
+      } else {
+        if (kids.some((f) => f.childFolderCount > 0)) truncated = true;
+        frontier = [];
+      }
+    }
+    return { folders: out, truncated };
+  }
+
+  /**
+   * Resolve a well-known name, folder id, or (case-insensitive) displayName to a
+   * folder id usable in Graph URLs. Custom folders (e.g. "External Senders") can
+   * be passed by name; Graph itself only accepts well-known names or base64 ids.
+   */
+  async resolveFolderId(nameOrId: string): Promise<string> {
+    const q = nameOrId.trim();
+    if (!q) throw new Error('Folder name or id is required');
+    const lower = q.toLowerCase();
+    const wellKnown = new Set([
+      'inbox', 'drafts', 'sentitems', 'archive', 'deleteditems', 'junkemail', 'outbox',
+      'clutter', 'conflicts', 'conversationhistory', 'localfailures', 'msgfolderroot',
+      'recoverableitemsdeletions', 'scheduled', 'searchfolders', 'serverfailures', 'syncissues',
+    ]);
+    if (wellKnown.has(lower)) return lower;
+    // Id-shaped input (long, opaque base64-ish): probe it directly so a valid folder
+    // id keeps working even if the full-tree enumeration below would throttle/fail.
+    if (q.length > 80 && /^[A-Za-z0-9+/=_-]+$/.test(q)) {
+      try {
+        await this.request<{ id: string }>('GET', `/me/mailFolders/${encodeURIComponent(q)}`, { query: { $select: 'id' } });
+        return q;
+      } catch (err) {
+        if (!(err instanceof GraphApiError) || (err.statusCode !== 404 && err.statusCode !== 400)) throw err;
+        // Not a folder id after all — fall through to name resolution.
+      }
+    }
+    const { folders, truncated } = await this.listMailFoldersDeep();
+    // Exact id match wins (Graph ids are opaque; don't guess by shape).
+    if (folders.some((f) => f.id === q)) return q;
+    const exact = folders.filter((f) => f.displayName.toLowerCase() === lower);
+    if (exact.length === 1 && !truncated) return exact[0].id;
+    if (exact.length > 1) {
+      throw new Error(`Multiple folders named "${nameOrId}" (in different parents). Use the folder id from list-folders.`);
+    }
+    const partial = folders.filter((f) => f.displayName.toLowerCase().includes(lower));
+    if (partial.length === 1 && !truncated) return partial[0].id;
+    if (partial.length > 1) {
+      throw new Error(`Ambiguous folder "${nameOrId}" — matches: ${partial.map((f) => f.displayName).join(', ')}. Use an exact name.`);
+    }
+    // No unique name match (or the folder tree was too deep to enumerate fully):
+    // fall back to treating the input as an opaque folder id.
+    if (/^[A-Za-z0-9+/=_-]+$/.test(q)) return q;
+    throw new Error(`No mail folder named "${nameOrId}". Use list-folders to see available folders.`);
   }
 
   private async batch(
@@ -609,12 +694,23 @@ export class GraphClient {
   }
 
   async listChildFolders(parentId: string, depth: number): Promise<MailFolder[]> {
-    const r = await this.request<GraphList<RawMailFolder>>(
+    return (await this.listChildFoldersPaged(parentId, depth)).folders;
+  }
+
+  private async listChildFoldersPaged(parentId: string, depth: number): Promise<{ folders: MailFolder[]; truncated: boolean }> {
+    const first = await this.request<GraphList<RawMailFolder>>(
       'GET',
       `/me/mailFolders/${encodeURIComponent(parentId)}/childFolders`,
       { query: { $top: '100', $select: MAIL_FOLDER_SELECT } },
     );
-    return r.value.map((f) => normalizeMailFolder(f, null, parentId, depth));
+    const raw = [...first.value];
+    let next = first['@odata.nextLink'] ?? null;
+    for (let i = 0; next && i < 20; i++) {
+      const page = await this.request<GraphList<RawMailFolder>>('GET', next);
+      raw.push(...page.value);
+      next = page['@odata.nextLink'] ?? null;
+    }
+    return { folders: raw.map((f) => normalizeMailFolder(f, null, parentId, depth)), truncated: next != null };
   }
 
   async listMail(
@@ -777,12 +873,73 @@ export class GraphClient {
     await this.request('POST', `/me/messages/${encodeURIComponent(messageId)}/${path}`, { body });
   }
 
-  async searchMail(query: string, top = 25): Promise<NormalizedMailSummary[]> {
-    const r = await this.request<GraphList<RawMail>>('GET', '/me/messages', {
-      query: { $search: `"${query.replace(/"/g, '\\"')}"`, $top: String(Math.min(top, 100)), $select: MAIL_SUMMARY_SELECT },
-      headers: { ConsistencyLevel: 'eventual' },
-    });
-    return r.value.map(normalizeMailSummary);
+  async searchMail(
+    query: string,
+    top = 25,
+    opts: { from?: string; since?: string; until?: string; unreadOnly?: boolean; hasAttachments?: boolean } = {},
+  ): Promise<NormalizedMailSummary[]> {
+    const date = (label: string, v?: string) => {
+      if (!v) return null;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new Error(`${label} must be a YYYY-MM-DD date, got "${v}"`);
+      return v;
+    };
+    const since = date('since', opts.since);
+    const until = date('until', opts.until);
+    const pageSize = Math.min(top, 100);
+
+    // Only free-text and from: require $search (KQL). Everything else (isRead,
+    // received dates, hasAttachments) is expressible as an OData $filter, which
+    // filters server-side — so prefer $filter unless a real $search term is present.
+    const needsSearch = !!(query && query.trim()) || !!opts.from;
+    if (!needsSearch) {
+      const filters: string[] = [];
+      if (opts.unreadOnly) filters.push('isRead eq false');
+      if (since) filters.push(`receivedDateTime ge ${since}T00:00:00Z`);
+      if (until) filters.push(`receivedDateTime le ${until}T23:59:59Z`);
+      if (opts.hasAttachments) filters.push('hasAttachments eq true');
+      const q: Record<string, string> = {
+        $top: String(pageSize),
+        $select: MAIL_SUMMARY_SELECT,
+      };
+      // Graph rejects $orderby combined with a $filter unless the ordered field leads
+      // the filter, so only order when there's no filter.
+      if (filters.length) q.$filter = filters.join(' and ');
+      else q.$orderby = 'receivedDateTime desc';
+      const r = await this.request<GraphList<RawMail>>('GET', '/me/messages', { query: q });
+      return r.value.map(normalizeMailSummary).slice(0, top);
+    }
+
+    // $search + $filter cannot be combined on /messages, so express refiners as KQL inside $search.
+    const kqlStr = (v: string) => `"${v.replace(/["\\]/g, '\\$&')}"`;
+    const terms: string[] = [];
+    if (query && query.trim()) terms.push(kqlStr(query));
+    if (opts.from) terms.push(`from:${kqlStr(opts.from)}`);
+    if (opts.hasAttachments) terms.push('hasAttachments:true');
+    if (since) terms.push(`received>=${since}`);
+    if (until) terms.push(`received<=${until}`);
+
+    // isRead is not a searchable $search property; post-filter instead of injecting it into KQL.
+    const search = terms.join(' AND ');
+    // Unread filtering is client-side, so fetch a larger candidate page (independent of `top`)
+    // to avoid a small `top` starving the filter.
+    const candidatePage = opts.unreadOnly ? Math.min(Math.max(top, 50), 100) : pageSize;
+    let url =
+      `${GRAPH_BASE_URL}/me/messages?` +
+      new URLSearchParams({ $search: search, $top: String(candidatePage), $select: MAIL_SUMMARY_SELECT }).toString();
+    const out: NormalizedMailSummary[] = [];
+    // With unreadOnly we post-filter, so page until we have `top` unread (bounded).
+    for (let i = 0; i < (opts.unreadOnly ? 5 : 1) && url; i++) {
+      const r: GraphList<RawMail> = await this.request('GET', url, {
+        headers: { ConsistencyLevel: 'eventual' },
+      });
+      for (const m of r.value.map(normalizeMailSummary)) {
+        if (opts.unreadOnly && m.isRead) continue;
+        out.push(m);
+      }
+      if (out.length >= top) break;
+      url = r['@odata.nextLink'] ?? '';
+    }
+    return out.slice(0, top);
   }
 }
 
@@ -823,6 +980,20 @@ interface RawMail {
   body?: { contentType?: string; content?: string };
 }
 
+/** Map with bounded concurrency so large folder trees don't fan out unbounded parallel Graph calls. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 function addr(r: RawEmailAddress): MailAddress {
   return { name: r.emailAddress?.name ?? null, address: r.emailAddress?.address ?? '' };
 }
@@ -858,7 +1029,7 @@ export function normalizeMailSummary(m: RawMail): NormalizedMailSummary {
     hasAttachments: m.hasAttachments ?? false,
     flagged: (m.flag?.flagStatus ?? 'notFlagged') === 'flagged',
     importance: (m.importance as 'low' | 'normal' | 'high') ?? 'normal',
-    bodyPreview: (m.bodyPreview ?? '').replace(/\s+/g, ' ').trim(),
+    bodyPreview: (m.bodyPreview ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
     webLink: m.webLink ?? null,
   };
 }

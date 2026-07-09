@@ -147,7 +147,7 @@ export async function loadMailFolders(api: PluginAPI, allowInteractive = false):
   api.state.set('loadingMailFolders', true);
   try {
     const client = await ensureAuthenticated(allowInteractive);
-    const all = await client.listMailFolders();
+    const { folders: all } = await client.listMailFolders();
     if (session !== tokenCache.currentSession()) return;
     const order = new Map(WELL_KNOWN_FOLDERS.map((n, i) => [n, i]));
     const sorted = [...all].sort((a, b) => {

@@ -220,6 +220,7 @@ function registerEnabledTools(api: PluginAPI): void {
     'set-presence': 'setPresence',
     'set-status-message': 'setStatusMessage',
     'invoke-card-action': 'invokeCardAction',
+    'list-folders': 'listFolders',
     'list-mail': 'listMail',
     'get-mail': 'getMail',
     'search-mail': 'searchMail',

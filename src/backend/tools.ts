@@ -64,6 +64,66 @@ function clampTop(v: unknown, def: number, max: number): number {
   return Math.min(Math.max(n, 1), max);
 }
 
+/** Default true unless explicitly set to false. */
+function wantConcise(input: unknown): boolean {
+  const c = (input as { concise?: unknown } | null)?.concise;
+  return c !== false;
+}
+
+type MailSummary = {
+  id: string; conversationId: string | null; subject: string; from: MailAddress | null; toRecipients: MailAddress[];
+  receivedDateTime: string | null; isRead: boolean; hasAttachments: boolean;
+  flagged: boolean; importance: string; bodyPreview: string;
+};
+
+function conciseMail(m: MailSummary) {
+  return {
+    id: m.id,
+    conversationId: m.conversationId,
+    subject: m.subject,
+    from: m.from ? `${m.from.name ?? ''} <${m.from.address}>`.trim() : null,
+    to: m.toRecipients.length,
+    received: m.receivedDateTime,
+    unread: !m.isRead || undefined,
+    hasAttachments: m.hasAttachments || undefined,
+    flagged: m.flagged || undefined,
+    importance: m.importance !== 'normal' ? m.importance : undefined,
+    preview: (m.bodyPreview ?? '').slice(0, 150),
+  };
+}
+
+function conciseChat(c: ReturnType<typeof normalizeChat>) {
+  const names = c.members.map((m) => m.displayName);
+  const shown = names.slice(0, 4).join(', ');
+  const members = names.length > 4 ? `${shown}, +${names.length - 4}` : shown;
+  return {
+    id: c.id,
+    type: c.type,
+    topic: c.topic,
+    members,
+    lastUpdated: c.lastUpdated,
+    lastMessagePreview: c.lastMessagePreview,
+    unread: c.unread || undefined,
+  };
+}
+
+function conciseMessage(m: ReturnType<typeof normalizeMessage>) {
+  return {
+    id: m.id,
+    chatId: m.chatId,
+    from: m.fromName,
+    fromMe: m.fromMe || undefined,
+    at: m.createdDateTime,
+    text: m.text,
+    replyTo: m.replyTo ? { from: m.replyTo.senderName, preview: m.replyTo.text } : undefined,
+    hasAttachments:
+      (m.attachments.length + m.files.length + m.cards.length + m.hostedImages.length) > 0 || undefined,
+    reactions: m.reactions.length ? m.reactions : undefined,
+    systemEvent: m.systemEvent ?? undefined,
+    deleted: m.deleted || undefined,
+  };
+}
+
 async function buildOutgoing(
   client: GraphClient,
   chatId: string,
@@ -191,6 +251,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
               'Case-insensitive substring matched against chat topic and member display names/emails after fetching.',
           },
           top: { type: 'number', description: 'Max chats to fetch from Graph before filtering (default 50).' },
+          concise: { type: 'boolean', description: 'Compact output (default true): trims each chat to id, type, topic, a short member summary, last update, preview and unread. Set false for full members[] and webUrl.' },
         },
         additionalProperties: false,
       },
@@ -217,7 +278,8 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
                 ),
             );
           }
-          return { success: true, count: chats.length, chats };
+          const out = wantConcise(input) ? chats.map(conciseChat) : chats;
+          return { success: true, count: chats.length, chats: out };
         } catch (err) {
           return errResult(err);
         }
@@ -233,6 +295,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
         properties: {
           chatId: { type: 'string', description: 'The chat id, e.g. 19:...@unq.gbl.spaces or 19:...@thread.v2' },
           top: { type: 'number', description: 'Max messages to return (default 25, max 50).' },
+          concise: { type: 'boolean', description: 'Compact output (default true): id, from, at, text, and flags for replies/attachments/reactions. Set false for full segments[], hostedImages[], card JSON and attachment details.' },
         },
         required: ['chatId'],
         additionalProperties: false,
@@ -246,7 +309,8 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           const messages = msgs
             .filter((m) => m.messageType === 'message' || m.messageType == null)
             .map((m) => normalizeMessage(m, myId));
-          return { success: true, chatId, count: messages.length, messages };
+          const out = wantConcise(input) ? messages.map(conciseMessage) : messages;
+          return { success: true, chatId, count: messages.length, messages: out };
         } catch (err) {
           return errResult(err);
         }
@@ -757,13 +821,32 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
 
     // ── Mail (Outlook) ──
     {
+      name: 'list-folders',
+      description:
+        'List mailbox folders (Inbox plus custom folders like "External Senders") with id, name, and unread/total counts. Use this to discover a folder id or its exact name before calling list-mail on a custom folder.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      execute: async () => {
+        try {
+          const client = await ensureAuthenticated();
+          const { folders, truncated } = await client.listMailFoldersDeep();
+          return {
+            success: true,
+            count: folders.length,
+            ...(truncated ? { truncated: true, note: 'Folder tree is deeper than the enumeration limit; some nested folders are omitted. Use a folder id for those.' } : {}),
+            folders: folders.map((f) => ({ id: f.id, name: f.displayName, unread: f.unreadItemCount, total: f.totalItemCount })),
+          };
+        } catch (err) { return errResult(err); }
+      },
+    },
+    {
       name: 'list-mail',
-      description: 'List messages in a mail folder (default: inbox). Returns summaries only; use get-mail for the full body.',
+      description: 'List messages in a mail folder (default: inbox). Accepts a well-known name, a custom folder name (e.g. "External Senders"), or a folder id. Returns summaries only; use get-mail for the full body.',
       inputSchema: {
         type: 'object',
         properties: {
-          folder: { type: 'string', description: 'Well-known name (inbox, sentitems, archive, drafts, deleteditems) or folder id.', default: 'inbox' },
+          folder: { type: 'string', description: 'Well-known name (inbox, sentitems, archive, drafts, deleteditems, junkemail), a custom folder display name, or a folder id.', default: 'inbox' },
           top: { type: 'number', default: 20 },
+          concise: { type: 'boolean', description: 'Compact output (default true): trims each message to id, subject, from, recipient count, received, and a short preview. Set false for full toRecipients[], webLink and conversationId.' },
         },
         additionalProperties: false,
       },
@@ -771,8 +854,10 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
         try {
           const client = await ensureAuthenticated();
           const { folder, top } = input as { folder?: string; top?: number };
-          const { messages } = await client.listMail(folder ?? 'inbox', clampTop(top, 20, 50));
-          return { success: true, folder: folder ?? 'inbox', count: messages.length, messages };
+          const folderId = await client.resolveFolderId(folder ?? 'inbox');
+          const { messages } = await client.listMail(folderId, clampTop(top, 20, 50));
+          const out = wantConcise(input) ? messages.map(conciseMail) : messages;
+          return { success: true, folder: folder ?? 'inbox', count: messages.length, messages: out };
         } catch (err) { return errResult(err); }
       },
     },
@@ -791,19 +876,32 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
     },
     {
       name: 'search-mail',
-      description: 'Full-text search across the mailbox (subject, body, participants). Supports KQL-style filters like from:, to:, hasAttachments:true.',
+      description: 'Full-text search across the mailbox (subject, body, participants). Supports KQL-style filters in the query (from:, to:, hasAttachments:true) plus the structured from/since/until/unreadOnly/hasAttachments params below.',
       inputSchema: {
         type: 'object',
-        properties: { query: { type: 'string' }, top: { type: 'number', default: 15 } },
+        properties: {
+          query: { type: 'string', description: 'Free-text query. May be empty when using the structured filters below.' },
+          top: { type: 'number', default: 15 },
+          from: { type: 'string', description: 'Restrict to a sender (name fragment or email address).' },
+          since: { type: 'string', description: 'Only messages received on/after this date (YYYY-MM-DD).' },
+          until: { type: 'string', description: 'Only messages received on/before this date (YYYY-MM-DD).' },
+          unreadOnly: { type: 'boolean', description: 'Only unread messages (applied client-side to the search results).' },
+          hasAttachments: { type: 'boolean', description: 'Only messages with attachments.' },
+          concise: { type: 'boolean', description: 'Compact output (default true). Set false for full toRecipients[], webLink and conversationId.' },
+        },
         required: ['query'],
         additionalProperties: false,
       },
       execute: async (input) => {
         try {
           const client = await ensureAuthenticated();
-          const { query, top } = input as { query: string; top?: number };
-          const results = await client.searchMail(query, clampTop(top, 15, 50));
-          return { success: true, query, count: results.length, results };
+          const { query, top, from, since, until, unreadOnly, hasAttachments } = input as {
+            query: string; top?: number; from?: string; since?: string; until?: string;
+            unreadOnly?: boolean; hasAttachments?: boolean;
+          };
+          const results = await client.searchMail(query, clampTop(top, 15, 50), { from, since, until, unreadOnly, hasAttachments });
+          const out = wantConcise(input) ? results.map(conciseMail) : results;
+          return { success: true, query, count: results.length, results: out };
         } catch (err) { return errResult(err); }
       },
     },
@@ -1011,6 +1109,7 @@ export const ALL_TOOL_NAMES = [
   'set-presence',
   'set-status-message',
   'invoke-card-action',
+  'list-folders',
   'list-mail',
   'get-mail',
   'search-mail',

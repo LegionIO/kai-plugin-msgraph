@@ -423,6 +423,7 @@ export interface ToolPermissions {
   setPresence: boolean;
   setStatusMessage: boolean;
   invokeCardAction: boolean;
+  listFolders: boolean;
   listMail: boolean;
   getMail: boolean;
   searchMail: boolean;
@@ -451,6 +452,7 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
   setPresence: true,
   setStatusMessage: true,
   invokeCardAction: false,
+  listFolders: true,
   listMail: true,
   getMail: true,
   searchMail: true,
