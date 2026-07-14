@@ -50,10 +50,19 @@ export function init(api: PluginAPI, maxEntries = DEFAULT_IMAGE_CACHE_MAX_ENTRIE
   );
 }
 
+/** Only Teams hostedContents URLs are surfaced to the UI state map; mail/ref
+ *  keys share the same byte cache but the renderer never looks them up. */
+function isHostedUrl(key: string): boolean {
+  return key.startsWith('https://');
+}
+
 export function published(): Record<string, string | null> {
-  if (!mediaServer.baseUrl()) return Object.fromEntries(cache);
   const out: Record<string, string | null> = {};
-  for (const [k, v] of cache) out[k] = v === null ? null : mediaServer.urlFor('hosted', k);
+  const base = mediaServer.baseUrl();
+  for (const [k, v] of cache) {
+    if (!isHostedUrl(k)) continue;
+    out[k] = v === null ? null : base ? mediaServer.urlFor('hosted', k) : v;
+  }
   return out;
 }
 
@@ -96,59 +105,79 @@ function splitDataUrl(dataUrl: string): { base64: string; mediaType: string } {
 }
 
 /**
- * Get one hosted content as raw base64 + media type, serving from cache when
- * present and fetching from Graph only on a miss. This is the rate-limit-safe
- * path for tooling: repeated requests for the same image never re-hit Graph.
- * Returns null when the content is confirmed unfetchable (permanent 4xx).
+ * Generic get-or-fetch against the shared attachment-bytes cache, keyed by an
+ * arbitrary string. Serves cached bytes with zero network, coalesces concurrent
+ * in-flight fetches for the same key, and on a transient failure (429/5xx/
+ * network) falls back to a stale cached copy rather than erroring. Returns null
+ * when the fetch is a permanent failure (4xx) or yields no bytes.
+ *
+ * `key` must uniquely and stably identify the content (e.g. the hostedContents
+ * URL, or `mail:<messageId>:<attachmentId>`, or `ref:<contentUrl>`).
  */
-export async function getOne(
+export async function getOneVia(
   api: PluginAPI,
-  client: GraphClient,
-  url: string,
+  key: string,
+  fetcher: () => Promise<{ base64: string; mediaType: string }>,
 ): Promise<{ base64: string; mediaType: string } | null> {
-  if (!url) return null;
-  const cached = cache.get(url);
-  if (cached !== undefined && !staleAt.has(url)) {
+  if (!key) return null;
+  const cached = cache.get(key);
+  if (cached !== undefined && !staleAt.has(key)) {
     return cached === null ? null : splitDataUrl(cached);
   }
   // Coalesce with any in-flight fetch (background ensure() or a concurrent
-  // getOne) for the same URL: wait for it rather than issuing a duplicate call.
-  if (inFlight.has(url)) {
-    for (let i = 0; i < 100 && inFlight.has(url); i++) {
+  // getOne*) for the same key: wait for it rather than issuing a duplicate call.
+  if (inFlight.has(key)) {
+    for (let i = 0; i < 100 && inFlight.has(key); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    const after = cache.get(url);
-    if (after !== undefined && !staleAt.has(url)) {
+    const after = cache.get(key);
+    if (after !== undefined && !staleAt.has(key)) {
       return after === null ? null : splitDataUrl(after);
     }
-    // Fell through (timeout, or still stale): fetch below only if nobody else is.
-    if (inFlight.has(url)) {
-      const anyCopy = cache.get(url);
+    if (inFlight.has(key)) {
+      const anyCopy = cache.get(key);
       return anyCopy ? splitDataUrl(anyCopy) : null;
     }
   }
-  inFlight.add(url);
+  inFlight.add(key);
   const session = tokenCache.currentSession();
   try {
-    const raw = await client.getHostedContentRaw(url);
+    const raw = await fetcher();
+    if (!raw.base64) {
+      if (session === tokenCache.currentSession()) store(key, null);
+      return null;
+    }
     if (session === tokenCache.currentSession()) {
-      store(url, `data:${raw.mediaType};base64,${raw.base64}`);
+      store(key, `data:${raw.mediaType};base64,${raw.base64}`);
       schedulePublish(api);
     }
     return raw;
   } catch (err) {
     const status = err instanceof GraphApiError ? err.statusCode : 0;
     if (status >= 400 && status < 500 && status !== 429 && session === tokenCache.currentSession()) {
-      store(url, null); // permanent failure — remember as unfetchable
+      store(key, null); // permanent failure — remember as unfetchable
       return null;
     }
     // 429 / 5xx / network: if we have a stale copy, fall back to it rather than error.
-    const stale = cache.get(url);
+    const stale = cache.get(key);
     if (stale) return splitDataUrl(stale);
     throw err;
   } finally {
-    inFlight.delete(url);
+    inFlight.delete(key);
   }
+}
+
+/**
+ * Get one Teams hostedContents URL as raw base64 + media type, cached. This is
+ * the rate-limit-safe path for tooling: repeated requests never re-hit Graph.
+ * The cache key is the URL itself, matching the UI's ensure() prefetch path.
+ */
+export function getOne(
+  api: PluginAPI,
+  client: GraphClient,
+  url: string,
+): Promise<{ base64: string; mediaType: string } | null> {
+  return getOneVia(api, url, () => client.getHostedContentRaw(url));
 }
 
 /** Background prefetch for the UI: fills any missing/stale URLs, publishing as results arrive. */

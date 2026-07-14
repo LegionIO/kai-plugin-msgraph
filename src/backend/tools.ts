@@ -1172,12 +1172,15 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
                 error: `No matching attachment. Available: ${atts.map((a, i) => `[${i}] ${a.name} (${a.contentType ?? '?'})`).join('; ')}`,
               };
             }
-            const { base64, mediaType, name: fname } = await client.getMailAttachmentRaw(messageId, chosen.id);
-            if (!base64) return { error: `Attachment "${fname}" has no downloadable content (may be an item/reference attachment).` };
+            const cacheKey = `mail:${messageId}:${chosen.id}`;
+            const got = await hostedContentCache.getOneVia(api, cacheKey, () =>
+              client.getMailAttachmentRaw(messageId, chosen.id),
+            );
+            if (!got) return { error: `Attachment "${chosen.name ?? 'attachment'}" has no downloadable content (may be an item/reference attachment).` };
             return {
-              success: true, source, messageId, name: fname, mediaType,
-              bytes: Math.floor((base64.length * 3) / 4),
-              _modelContent: [partForMedia(base64, mediaType, fname)],
+              success: true, source, messageId, name: chosen.name ?? 'attachment', mediaType: got.mediaType,
+              bytes: Math.floor((got.base64.length * 3) / 4),
+              _modelContent: [partForMedia(got.base64, got.mediaType, chosen.name ?? undefined)],
             };
           }
 
@@ -1218,7 +1221,14 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             }
             ({ base64, mediaType } = got);
           } else {
-            ({ base64, mediaType } = await client.downloadReferenceAttachment(chosen.url));
+            // SharePoint/OneDrive reference — cached by its contentUrl.
+            const got = await hostedContentCache.getOneVia(api, `ref:${chosen.url}`, () =>
+              client.downloadReferenceAttachment(chosen.url!),
+            );
+            if (!got) {
+              return { error: `Attachment "${chosen.name ?? 'file'}" could not be downloaded from SharePoint/OneDrive.` };
+            }
+            ({ base64, mediaType } = got);
           }
           return {
             success: true, source, chatId, messageId, name: chosen.name ?? 'attachment', mediaType,

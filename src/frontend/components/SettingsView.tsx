@@ -422,7 +422,7 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
           />
         </label>
         <label className="flex items-center gap-2 text-xs mt-3">
-          <span>Cached conversation images (max)</span>
+          <span>Cached attachment files (max)</span>
           <input
             className="w-20 px-2 py-1 text-xs bg-muted border border-border rounded-lg text-foreground focus:border-primary transition-colors"
             type="number"

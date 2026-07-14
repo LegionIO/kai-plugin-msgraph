@@ -399,7 +399,7 @@ export interface UserPreferences {
   notifications: boolean;
   pollIntervalSeconds: number;
   debugLogging: boolean;
-  /** Max conversation images kept in the on-disk hosted-content cache (oldest evicted). */
+  /** Max attachment files (Teams images, mail & SharePoint attachments) kept in the on-disk bytes cache (oldest evicted). */
   imageCacheMaxEntries?: number;
   /** Manual signature override (HTML). Used when Outlook's roaming signatures aren't fetchable. */
   mailSignatureHtml?: string;
