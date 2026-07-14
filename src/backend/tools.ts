@@ -1098,8 +1098,10 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       name: 'get-attachment',
       description:
         'Fetch a file/attachment from a Teams message or an Outlook mail and return its contents so you can read it — images (screenshots, photos), PDFs, and other documents. ' +
-        'For Teams, pass source="teams" with chatId + messageId; the attachment is picked by name or attachmentId (omit to grab the first non-card file). ' +
-        'For mail, pass source="mail" with messageId; use get-mail first to list attachment ids/names.',
+        'For Teams, pass source="teams" with chatId + messageId; the attachment is picked by name, index, or attachmentId (omit all to grab the first file). ' +
+        'For mail, pass source="mail" with messageId; use get-mail first to list attachment ids/names. ' +
+        'Name matching is tolerant of whitespace/case; when a name is ambiguous or fails, the error lists available attachments with [index] — retry with that index. ' +
+        'For a pasted/inline screenshot use get-teams-image instead.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1107,7 +1109,8 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           messageId: { type: 'string', description: 'Teams message id or mail message id.' },
           chatId: { type: 'string', description: 'Required when source="teams".' },
           attachmentId: { type: 'string', description: 'Mail attachment id (from get-mail), or Teams attachment id.' },
-          name: { type: 'string', description: 'Match an attachment by (case-insensitive) file name instead of id.' },
+          name: { type: 'string', description: 'Match an attachment by file name (tolerant of case/whitespace, falls back to substring).' },
+          index: { type: 'number', description: 'Zero-based index into the message\'s attachment list (see the [index] hints in an error). Most reliable selector.' },
         },
         required: ['source', 'messageId'],
         additionalProperties: false,
@@ -1115,11 +1118,38 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       execute: async (input) => {
         try {
           const client = await ensureAuthenticated();
-          const { source, messageId, chatId, attachmentId, name } = input as {
-            source: 'teams' | 'mail'; messageId: string; chatId?: string; attachmentId?: string; name?: string;
+          const { source, messageId, chatId, attachmentId, name, index } = input as {
+            source: 'teams' | 'mail'; messageId: string; chatId?: string; attachmentId?: string; name?: string; index?: number;
           };
-          const nameMatches = (n: string | null | undefined) =>
-            !!name && !!n && n.toLowerCase() === name.toLowerCase();
+          // Filenames from Graph can carry stray whitespace / zero-width chars,
+          // so match tolerantly: normalize (trim, strip zero-width, collapse
+          // whitespace, casefold) and compare exact-then-substring rather than
+          // requiring a byte-for-byte equal name.
+          const norm = (s: string | null | undefined): string =>
+            (s ?? '')
+              .replace(/[\u200B-\u200D\uFEFF]/g, '') // strip zero-width chars & BOM
+              .replace(/\u00A0/g, ' ') // NBSP -> normal space
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+          const q = name ? norm(name) : '';
+          const nameScore = (n: string | null | undefined): number => {
+            if (!name) return 0;
+            const cand = norm(n);
+            if (cand === q) return 2; // exact (normalized)
+            if (cand.includes(q) || q.includes(cand)) return 1; // substring either way
+            return 0;
+          };
+          /** Pick the best name match from a list, or undefined if none score > 0. */
+          const bestByName = <T extends { name: string | null }>(list: T[]): T | undefined => {
+            let best: T | undefined;
+            let bestScore = 0;
+            for (const item of list) {
+              const s = nameScore(item.name);
+              if (s > bestScore) { best = item; bestScore = s; }
+            }
+            return best;
+          };
 
           if (source === 'mail') {
             const mail = await client.getMail(messageId);
@@ -1127,11 +1157,12 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             if (atts.length === 0) return { error: 'That mail has no attachments.' };
             const chosen =
               (attachmentId && atts.find((a) => a.id === attachmentId)) ||
-              (name && atts.find((a) => nameMatches(a.name))) ||
-              (!attachmentId && !name ? atts[0] : undefined);
+              (typeof index === 'number' ? atts[index] : undefined) ||
+              (name && bestByName(atts)) ||
+              (!attachmentId && !name && index == null ? atts[0] : undefined);
             if (!chosen) {
               return {
-                error: `No matching attachment. Available: ${atts.map((a) => `${a.name} (${a.contentType ?? '?'})`).join('; ')}`,
+                error: `No matching attachment. Available: ${atts.map((a, i) => `[${i}] ${a.name} (${a.contentType ?? '?'})`).join('; ')}`,
               };
             }
             const { base64, mediaType, name: fname } = await client.getMailAttachmentRaw(messageId, chosen.id);
@@ -1147,18 +1178,28 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           if (!chatId) return { error: 'chatId is required when source="teams".' };
           const raw = await client.getMessage(chatId, messageId);
           const msg = normalizeMessage(raw, tokenCache.getObjectId());
+          // Keep url-less entries in the list so name matching still works and we
+          // can give a targeted error; only require a url at download time.
           const candidates = [
             ...msg.attachments.map((a) => ({ name: a.name, contentType: a.contentType, url: a.url })),
             ...msg.files.map((a) => ({ name: a.name, contentType: a.contentType, url: a.url })),
-          ].filter((a) => a.url);
+          ];
           if (candidates.length === 0) {
-            return { error: 'That message has no downloadable file attachments. (Inline images use get-teams-image.)' };
+            return { error: 'That message has no file attachments. (Inline pasted images use get-teams-image.)' };
           }
           const chosen =
-            (name && candidates.find((a) => nameMatches(a.name))) ||
-            (!name ? candidates[0] : undefined);
-          if (!chosen || !chosen.url) {
-            return { error: `No matching attachment. Available: ${candidates.map((a) => a.name).join('; ')}` };
+            (typeof index === 'number' ? candidates[index] : undefined) ||
+            (name && bestByName(candidates)) ||
+            (!name && index == null ? candidates[0] : undefined);
+          if (!chosen) {
+            return {
+              error: `No matching attachment. Available: ${candidates.map((a, i) => `[${i}] ${a.name}`).join('; ')}`,
+            };
+          }
+          if (!chosen.url) {
+            return {
+              error: `Attachment "${chosen.name ?? 'file'}" has no direct download URL — it is likely an inline pasted image. Use get-teams-image for this message instead.`,
+            };
           }
           let base64: string;
           let mediaType: string;
