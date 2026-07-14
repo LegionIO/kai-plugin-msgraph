@@ -164,6 +164,8 @@ export interface NormalizedMessage {
   replyTo: { id: string | null; senderName: string | null; text: string | null } | null;
   forwarded: { senderName: string | null; text: string | null; originalDate: string | null } | null;
   files: Array<{ name: string; url: string | null; contentType: string | null }>;
+  /** Image-typed file attachments (by extension) that can be rendered inline; bytes fetched into the hosted-content cache and published to state.hostedContents keyed by url. */
+  imageFiles: Array<{ name: string; url: string; contentType: string | null }>;
   cards: Array<{ id: string | null; name: string | null; contentJson: string }>;
   attachments: Array<{ name: string | null; contentType: string | null; url: string | null }>;
   systemEvent: string | null;

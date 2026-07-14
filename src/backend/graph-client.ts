@@ -1104,6 +1104,14 @@ function extractHostedImages(html: string): string[] {
   return out;
 }
 
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?|avif)$/i;
+/** True when a file/attachment looks like an image by content type or filename. */
+function looksLikeImage(name: string | null | undefined, contentType: string | null | undefined): boolean {
+  if (contentType && contentType.startsWith('image/')) return true;
+  // Teams "reference" attachments report contentType "reference", so fall back to the name.
+  return !!name && IMAGE_EXT_RE.test(name.trim());
+}
+
 function stripHtml(html: string): string {
   return html
     .replace(/<br\s*\/?>/gi, '\n')
@@ -1316,6 +1324,17 @@ export function normalizeMessage(m: GraphMessage, myId: string | null): Normaliz
     (a) => !handled.has(a.contentType ?? '') && !(a.contentType ?? '').startsWith('application/vnd.microsoft.card.'),
   );
   const systemEvent = m.messageType && m.messageType !== 'message' ? describeEvent(m.eventDetail) : null;
+  const normAttachments = attachments.map((a) => ({
+    name: a.name ?? null,
+    contentType: a.contentType ?? null,
+    url: a.contentUrl ?? null,
+  }));
+  // Image-typed file attachments that can be rendered inline (have a URL).
+  const imageFiles = [...files, ...normAttachments]
+    .filter((a): a is { name: string; url: string; contentType: string | null } =>
+      !!a.url && looksLikeImage(a.name, a.contentType),
+    )
+    .map((a) => ({ name: a.name ?? 'image', url: a.url, contentType: a.contentType }));
   return {
     id: m.id,
     chatId: m.chatId ?? '',
@@ -1331,12 +1350,9 @@ export function normalizeMessage(m: GraphMessage, myId: string | null): Normaliz
     replyTo,
     forwarded,
     files,
+    imageFiles,
     cards,
-    attachments: attachments.map((a) => ({
-      name: a.name ?? null,
-      contentType: a.contentType ?? null,
-      url: a.contentUrl ?? null,
-    })),
+    attachments: normAttachments,
     systemEvent,
     reactions: normalizeReactions(m.reactions, myId),
     deleted: !!m.deletedDateTime,

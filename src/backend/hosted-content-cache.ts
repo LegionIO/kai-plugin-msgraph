@@ -51,9 +51,11 @@ export function init(api: PluginAPI, maxEntries = DEFAULT_IMAGE_CACHE_MAX_ENTRIE
 }
 
 /** Only Teams hostedContents URLs are surfaced to the UI state map; mail/ref
- *  keys share the same byte cache but the renderer never looks them up. */
+ *  keys share the same byte cache but the renderer never looks them up.
+ *  Image file-attachment URLs are opted in explicitly via publishedKeys. */
+const publishedKeys = new Set<string>();
 function isHostedUrl(key: string): boolean {
-  return key.startsWith('https://');
+  return key.startsWith('https://') || publishedKeys.has(key);
 }
 
 export function published(): Record<string, string | null> {
@@ -74,6 +76,7 @@ export function clear(): void {
   cache.clear();
   inFlight.clear();
   staleAt.clear();
+  publishedKeys.clear();
   disk?.clear();
   if (publishTimer) { clearTimeout(publishTimer); publishTimer = null; }
 }
@@ -204,6 +207,49 @@ export function ensure(api: PluginAPI, client: GraphClient, urls: Iterable<strin
             store(u, null);
           }
           getLogger().warn(`hostedContent fetch failed: ${err}`);
+        } finally {
+          inFlight.delete(u);
+        }
+        if (session === tokenCache.currentSession()) schedulePublish(api);
+      }
+    });
+    await Promise.all(workers);
+  })();
+}
+
+/**
+ * Prefetch image file-attachments (SharePoint references or graph-hosted files)
+ * for the UI, keyed by their raw URL and published to state.hostedContents so
+ * the panel can render them inline. Shares the same byte cache as the tools, so
+ * a UI-loaded image file costs the AI zero extra Graph calls (and vice-versa).
+ */
+export function ensureImageFiles(api: PluginAPI, client: GraphClient, urls: Iterable<string>): void {
+  const missing = [...new Set(urls)].filter(
+    (u) => u && !inFlight.has(u) && (!cache.has(u) || staleAt.has(u)),
+  );
+  if (missing.length === 0) return;
+  for (const u of missing) { inFlight.add(u); publishedKeys.add(u); }
+  const session = tokenCache.currentSession();
+
+  void (async () => {
+    let idx = 0;
+    const workers = Array.from({ length: Math.min(CONCURRENCY, missing.length) }, async () => {
+      while (idx < missing.length) {
+        if (session !== tokenCache.currentSession()) return;
+        const u = missing[idx++];
+        try {
+          const raw = u.startsWith('https://graph.microsoft.com/')
+            ? await client.getHostedContentRaw(u)
+            : await client.downloadReferenceAttachment(u);
+          if (session === tokenCache.currentSession()) {
+            store(u, raw.base64 ? `data:${raw.mediaType};base64,${raw.base64}` : null);
+          }
+        } catch (err) {
+          const status = err instanceof GraphApiError ? err.statusCode : 0;
+          if (status >= 400 && status < 500 && status !== 429 && session === tokenCache.currentSession()) {
+            store(u, null);
+          }
+          getLogger().warn(`image-file fetch failed: ${err}`);
         } finally {
           inFlight.delete(u);
         }

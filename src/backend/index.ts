@@ -410,15 +410,18 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
     const userIds = new Set<string>();
     const appIds = new Set<string>();
     const hosted = new Set<string>();
+    const imageFileUrls = new Set<string>();
     for (const m of normalized) {
       if (m.fromId) (m.fromApp ? appIds : userIds).add(m.fromId);
       for (const u of m.hostedImages) hosted.add(u);
+      for (const f of m.imageFiles) imageFileUrls.add(f.url);
     }
     photoCache.ensure(api, client, userIds);
     photoCache.ensureApps(api, client, appIds);
     presenceCache.refresh(api, client, userIds);
     trouter?.subscribePresence(userIds);
     hostedContentCache.ensure(api, client, hosted);
+    hostedContentCache.ensureImageFiles(api, client, imageFileUrls);
     void loadReadReceipts(api, chatId);
   } catch (err) {
     if (seq !== messageLoadSeq) return;
@@ -484,6 +487,7 @@ async function mergeMessage(api: PluginAPI, chatId: string, messageId: string): 
       }
     }
     if (norm.hostedImages.length) hostedContentCache.ensure(api, client, norm.hostedImages);
+    if (norm.imageFiles.length) hostedContentCache.ensureImageFiles(api, client, norm.imageFiles.map((f) => f.url));
   } catch (err) {
     getLogger().warn(`mergeMessage(${chatId},${messageId}) failed: ${err}; falling back to full reload`);
     if (st().activeChatId === chatId) void loadMessages(api, chatId);
@@ -840,13 +844,16 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           const userIds = new Set<string>();
           const appIds = new Set<string>();
           const hosted = new Set<string>();
+          const imageFileUrls = new Set<string>();
           for (const m of older) {
             if (m.fromId) (m.fromApp ? appIds : userIds).add(m.fromId);
             for (const u of m.hostedImages) hosted.add(u);
+            for (const f of m.imageFiles) imageFileUrls.add(f.url);
           }
           photoCache.ensure(api, client, userIds);
           photoCache.ensureApps(api, client, appIds);
           hostedContentCache.ensure(api, client, hosted);
+          hostedContentCache.ensureImageFiles(api, client, imageFileUrls);
         } finally {
           if (seq === messageLoadSeq) api.state.set('loadingOlderMessages', false);
         }

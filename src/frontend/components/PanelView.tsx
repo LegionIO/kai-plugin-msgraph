@@ -1036,9 +1036,12 @@ function MessageBubble({
   }
 
   const hasBody = m.segments.length > 0;
+  // Older cached/state messages predate imageFiles — default defensively.
+  const imageFiles = m.imageFiles ?? [];
+  const imageFileUrls = new Set(imageFiles.map((f) => f.url));
   const hasContent =
     hasBody || m.hostedImages.length > 0 || m.attachments.length > 0 || m.files.length > 0 ||
-    m.cards.length > 0 || !!m.replyTo || !!m.forwarded;
+    imageFiles.length > 0 || m.cards.length > 0 || !!m.replyTo || !!m.forwarded;
   const imageOnly =
     hasBody && m.segments.every((s) => s.type === 'image' || s.type === 'br') &&
     !m.replyTo && !m.forwarded && m.cards.length === 0 && m.files.length === 0;
@@ -1139,9 +1142,52 @@ function MessageBubble({
               pending={cardPending}
             />
           ))}
+          {imageFiles.length > 0 && (
+            <div className={`flex flex-col gap-1 ${hasBody || m.cards.length ? 'mt-1.5' : ''}`}>
+              {imageFiles.map((f, ii) => {
+                const src = hostedContents[f.url];
+                if (src) {
+                  return (
+                    <img
+                      key={`imf-${ii}`}
+                      src={src}
+                      alt={f.name}
+                      title={f.name}
+                      onLoad={onContentResize}
+                      referrerPolicy="no-referrer"
+                      style={{ maxHeight: 320, maxWidth: '100%', display: 'block', margin: '2px 0' }}
+                      className="rounded-xl object-contain"
+                    />
+                  );
+                }
+                // Not yet fetched (or failed): fall back to a file chip.
+                return (
+                  <a
+                    key={`imf-${ii}`}
+                    href={f.url}
+                    onClick={(e) => { e.preventDefault(); onAction('open-external', { url: f.url }); }}
+                    title={f.name}
+                    className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                      m.fromMe ? 'border-primary-foreground/30 bg-primary-foreground/10' : 'border-border bg-card text-foreground'
+                    } hover:opacity-90`}
+                    style={{ whiteSpace: 'normal', textDecoration: 'none' }}
+                  >
+                    {src === null ? (
+                      <span className="opacity-70">🖼️ {f.name} (unavailable)</span>
+                    ) : (
+                      <>
+                        <span className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                        <span className="truncate min-w-0">{f.name}</span>
+                      </>
+                    )}
+                  </a>
+                );
+              })}
+            </div>
+          )}
           {m.files.length > 0 && (
             <div className={`flex flex-col gap-1 ${hasBody || m.cards.length ? 'mt-1.5' : ''}`}>
-              {m.files.map((f, fi) => (
+              {m.files.filter((f) => !imageFileUrls.has(f.url ?? '')).map((f, fi) => (
                 <a
                   key={fi}
                   href={f.url ?? undefined}
@@ -1166,7 +1212,7 @@ function MessageBubble({
           {!hasContent && <span className="opacity-50 italic">(no content)</span>}
           {m.attachments.length > 0 && (
             <div className="mt-1 space-y-0.5">
-              {m.attachments.map((a, i) => (
+              {m.attachments.filter((a) => !imageFileUrls.has(a.url ?? '')).map((a, i) => (
                 <div key={i} className="text-[10px] opacity-80">📎 {a.name ?? a.contentType ?? 'attachment'}</div>
               ))}
             </div>
