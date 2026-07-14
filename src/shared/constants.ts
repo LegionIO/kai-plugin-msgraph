@@ -69,3 +69,4 @@ export const WELL_KNOWN_FOLDERS = ['inbox', 'drafts', 'sentitems', 'archive', 'd
 export const DEFAULT_CHAT_LIST_TOP = 50;
 export const DEFAULT_MESSAGE_TOP = 25;
 export const DEFAULT_POLL_INTERVAL_SECONDS = 30;
+export const DEFAULT_IMAGE_CACHE_MAX_ENTRIES = 100;

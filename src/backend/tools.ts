@@ -12,6 +12,7 @@ import {
   type UpsAvailability,
 } from './ic3-client.js';
 import { getLogger } from './logger-singleton.js';
+import * as hostedContentCache from './hosted-content-cache.js';
 
 const AVAIL_VALUES = ['Available', 'Busy', 'DoNotDisturb', 'BeRightBack', 'Away', 'Offline'] as const;
 
@@ -1083,9 +1084,15 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           const modelContent: ModelContentPart[] = [];
           const fetched: Array<{ mediaType: string; bytes: number }> = [];
           for (const u of urls) {
-            const { base64, mediaType } = await client.getHostedContentRaw(u);
-            modelContent.push(partForMedia(base64, mediaType));
-            fetched.push({ mediaType, bytes: Math.floor((base64.length * 3) / 4) });
+            // Served from the shared hosted-content cache (memory→disk) so
+            // repeated questions about the same image don't re-hit Graph (429s).
+            const got = await hostedContentCache.getOne(api, client, u);
+            if (!got) continue; // permanently unfetchable
+            modelContent.push(partForMedia(got.base64, got.mediaType));
+            fetched.push({ mediaType: got.mediaType, bytes: Math.floor((got.base64.length * 3) / 4) });
+          }
+          if (modelContent.length === 0) {
+            return { error: 'The inline image(s) could not be fetched (they may have expired or been removed).' };
           }
           return { success: true, chatId, messageId, count: fetched.length, images: fetched, _modelContent: modelContent };
         } catch (err) {
@@ -1204,7 +1211,12 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           let base64: string;
           let mediaType: string;
           if (chosen.url.startsWith('https://graph.microsoft.com/')) {
-            ({ base64, mediaType } = await client.getHostedContentRaw(chosen.url));
+            // Cached (memory→disk) to avoid re-fetching on repeat questions.
+            const got = await hostedContentCache.getOne(api, client, chosen.url);
+            if (!got) {
+              return { error: `Attachment "${chosen.name ?? 'file'}" could not be fetched (may have expired or been removed).` };
+            }
+            ({ base64, mediaType } = got);
           } else {
             ({ base64, mediaType } = await client.downloadReferenceAttachment(chosen.url));
           }

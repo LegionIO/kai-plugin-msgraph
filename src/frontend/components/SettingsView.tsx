@@ -422,6 +422,18 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
           />
         </label>
         <label className="flex items-center gap-2 text-xs mt-3">
+          <span>Cached conversation images (max)</span>
+          <input
+            className="w-20 px-2 py-1 text-xs bg-muted border border-border rounded-lg text-foreground focus:border-primary transition-colors"
+            type="number"
+            min={1}
+            value={prefs.imageCacheMaxEntries ?? 100}
+            onChange={(e) =>
+              onAction('set-preference', { key: 'imageCacheMaxEntries', value: Number(e.target.value) || 100 })
+            }
+          />
+        </label>
+        <label className="flex items-center gap-2 text-xs mt-3">
           <input
             type="checkbox"
             checked={prefs.debugLogging ?? false}

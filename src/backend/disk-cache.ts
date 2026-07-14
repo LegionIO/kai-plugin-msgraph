@@ -19,6 +19,7 @@ export class DiskCache<V> {
   private file: string;
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private dirty = false;
+  private maxEntries?: number;
 
   constructor(
     pluginName: string,
@@ -31,11 +32,33 @@ export class DiskCache<V> {
     },
     private readonly onLoaded?: () => void,
   ) {
+    this.maxEntries = opts.maxEntries;
     const dir = join(homedir(), '.kai', 'plugin-caches', pluginName);
     mkdirSync(dir, { recursive: true });
     this.file = join(dir, `${namespace}.json`);
     if (opts.sync) this.hydrate(this.readSync());
     else void this.loadAsync();
+  }
+
+  /** Update the entry cap and immediately evict oldest entries down to it. */
+  setMaxEntries(max: number): void {
+    this.maxEntries = max;
+    this.evictToCap();
+  }
+
+  private evictToCap(): void {
+    if (!this.maxEntries) return;
+    if (this.map.size <= this.maxEntries) return;
+    // Oldest-first eviction.
+    const sorted = [...this.map.entries()].sort((a, b) => a[1].at - b[1].at);
+    let removed = 0;
+    const toRemove = this.map.size - this.maxEntries;
+    for (const [k] of sorted) {
+      if (removed >= toRemove) break;
+      this.map.delete(k);
+      removed++;
+    }
+    if (removed > 0) this.scheduleWrite();
   }
 
   private readSync(): string | null {
@@ -81,7 +104,7 @@ export class DiskCache<V> {
 
   set(key: string, value: V): void {
     this.map.set(key, { v: value, at: Date.now() });
-    if (this.opts.maxEntries && this.map.size > this.opts.maxEntries) {
+    if (this.maxEntries && this.map.size > this.maxEntries) {
       // Evict oldest.
       let oldestK: string | null = null;
       let oldestAt = Infinity;

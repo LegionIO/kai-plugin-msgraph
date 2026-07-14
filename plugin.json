@@ -42,6 +42,11 @@
             "type": "boolean",
             "default": false,
             "description": "Write verbose debug logs to ~/.kai/plugin-logs/msgraph/"
+          },
+          "imageCacheMaxEntries": {
+            "type": "number",
+            "default": 100,
+            "description": "Max conversation images kept in the on-disk cache (oldest evicted). Higher retains more history for AI image questions; lower saves disk."
           }
         }
       },

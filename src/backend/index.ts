@@ -52,6 +52,7 @@ import {
   MAIL_NAV_ID,
   SETTINGS_ID,
   DEFAULT_POLL_INTERVAL_SECONDS,
+  DEFAULT_IMAGE_CACHE_MAX_ENTRIES,
   TOKEN_REFRESH_BUFFER_MS,
 } from '../shared/constants.js';
 import type {
@@ -96,6 +97,7 @@ function getPreferences(api: PluginAPI): UserPreferences {
     notifications: prefs.notifications ?? true,
     pollIntervalSeconds: prefs.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS,
     debugLogging: prefs.debugLogging ?? false,
+    imageCacheMaxEntries: prefs.imageCacheMaxEntries ?? DEFAULT_IMAGE_CACHE_MAX_ENTRIES,
     mailSignatureHtml: prefs.mailSignatureHtml,
     mailSignatureAutoNew: prefs.mailSignatureAutoNew,
     mailSignatureAutoReply: prefs.mailSignatureAutoReply,
@@ -1467,6 +1469,7 @@ export async function activate(api: PluginAPI): Promise<void> {
 
   mediaServer.start();
   photoCache.init(api);
+  hostedContentCache.init(api, getPreferences(api).imageCacheMaxEntries);
   initMail(api, (allowInteractive = false) => ensureAuthenticated(api, allowInteractive));
   peopleSearchDisk = new DiskCache<PeopleResults>(
     api.pluginName,
@@ -1655,6 +1658,7 @@ export async function activate(api: PluginAPI): Promise<void> {
   unsubConfig = api.config.onChanged(() => {
     registerEnabledTools(api);
     publishCredentialState(api);
+    hostedContentCache.setMaxEntries(getPreferences(api).imageCacheMaxEntries ?? DEFAULT_IMAGE_CACHE_MAX_ENTRIES);
   });
 
   // Proactive refresh_token loop — keeps access token fresh without user interaction.
@@ -1703,6 +1707,7 @@ export async function deactivate(): Promise<void> {
   for (const t of chatRefreshDebounce.values()) clearTimeout(t);
   chatRefreshDebounce.clear();
   photoCache.flush();
+  hostedContentCache.flush();
   peopleSearchDisk?.dispose();
   threadCache?.dispose();
   disposeMail();
