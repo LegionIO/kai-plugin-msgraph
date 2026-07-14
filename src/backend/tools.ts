@@ -70,6 +70,18 @@ function wantConcise(input: unknown): boolean {
   return c !== false;
 }
 
+/** A model-visible content part carried on a tool result (see host tool-model-content). */
+type ModelContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mediaType: string }
+  | { type: 'file'; data: string; mediaType: string; filename?: string };
+
+/** Classify a media type into the model-content part kind the model can consume. */
+function partForMedia(base64: string, mediaType: string, filename?: string): ModelContentPart {
+  if (mediaType.startsWith('image/')) return { type: 'image', data: base64, mediaType };
+  return { type: 'file', data: base64, mediaType, ...(filename ? { filename } : {}) };
+}
+
 type MailSummary = {
   id: string; conversationId: string | null; subject: string; from: MailAddress | null; toRecipients: MailAddress[];
   receivedDateTime: string | null; isRead: boolean; hasAttachments: boolean;
@@ -1037,6 +1049,136 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
     },
 
     {
+      name: 'get-teams-image',
+      description:
+        'Fetch the inline (pasted/screenshot) images from a Teams chat message and return them so you can actually see them — e.g. to read an error screenshot someone sent. ' +
+        'Use get-chat-messages first to find the message id; messages with images show hasAttachments. ' +
+        'By default returns every inline image on the message; pass index to fetch just one.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chatId: { type: 'string', description: 'The chat id containing the message.' },
+          messageId: { type: 'string', description: 'The message id (from get-chat-messages).' },
+          index: { type: 'number', description: 'Zero-based index to fetch a single inline image instead of all.' },
+        },
+        required: ['chatId', 'messageId'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { chatId, messageId, index } = input as { chatId: string; messageId: string; index?: number };
+          const raw = await client.getMessage(chatId, messageId);
+          const msg = normalizeMessage(raw, tokenCache.getObjectId());
+          let urls = msg.hostedImages;
+          if (urls.length === 0) {
+            return { error: 'That message has no inline images. (Files/SharePoint attachments use get-attachment.)' };
+          }
+          if (typeof index === 'number') {
+            if (index < 0 || index >= urls.length) {
+              return { error: `index ${index} out of range; message has ${urls.length} inline image(s).` };
+            }
+            urls = [urls[index]];
+          }
+          const modelContent: ModelContentPart[] = [];
+          const fetched: Array<{ mediaType: string; bytes: number }> = [];
+          for (const u of urls) {
+            const { base64, mediaType } = await client.getHostedContentRaw(u);
+            modelContent.push(partForMedia(base64, mediaType));
+            fetched.push({ mediaType, bytes: Math.floor((base64.length * 3) / 4) });
+          }
+          return { success: true, chatId, messageId, count: fetched.length, images: fetched, _modelContent: modelContent };
+        } catch (err) {
+          return errResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'get-attachment',
+      description:
+        'Fetch a file/attachment from a Teams message or an Outlook mail and return its contents so you can read it — images (screenshots, photos), PDFs, and other documents. ' +
+        'For Teams, pass source="teams" with chatId + messageId; the attachment is picked by name or attachmentId (omit to grab the first non-card file). ' +
+        'For mail, pass source="mail" with messageId; use get-mail first to list attachment ids/names.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', enum: ['teams', 'mail'], description: 'Where the attachment lives.' },
+          messageId: { type: 'string', description: 'Teams message id or mail message id.' },
+          chatId: { type: 'string', description: 'Required when source="teams".' },
+          attachmentId: { type: 'string', description: 'Mail attachment id (from get-mail), or Teams attachment id.' },
+          name: { type: 'string', description: 'Match an attachment by (case-insensitive) file name instead of id.' },
+        },
+        required: ['source', 'messageId'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { source, messageId, chatId, attachmentId, name } = input as {
+            source: 'teams' | 'mail'; messageId: string; chatId?: string; attachmentId?: string; name?: string;
+          };
+          const nameMatches = (n: string | null | undefined) =>
+            !!name && !!n && n.toLowerCase() === name.toLowerCase();
+
+          if (source === 'mail') {
+            const mail = await client.getMail(messageId);
+            const atts = mail.attachments.filter((a) => a.id);
+            if (atts.length === 0) return { error: 'That mail has no attachments.' };
+            const chosen =
+              (attachmentId && atts.find((a) => a.id === attachmentId)) ||
+              (name && atts.find((a) => nameMatches(a.name))) ||
+              (!attachmentId && !name ? atts[0] : undefined);
+            if (!chosen) {
+              return {
+                error: `No matching attachment. Available: ${atts.map((a) => `${a.name} (${a.contentType ?? '?'})`).join('; ')}`,
+              };
+            }
+            const { base64, mediaType, name: fname } = await client.getMailAttachmentRaw(messageId, chosen.id);
+            if (!base64) return { error: `Attachment "${fname}" has no downloadable content (may be an item/reference attachment).` };
+            return {
+              success: true, source, messageId, name: fname, mediaType,
+              bytes: Math.floor((base64.length * 3) / 4),
+              _modelContent: [partForMedia(base64, mediaType, fname)],
+            };
+          }
+
+          // Teams
+          if (!chatId) return { error: 'chatId is required when source="teams".' };
+          const raw = await client.getMessage(chatId, messageId);
+          const msg = normalizeMessage(raw, tokenCache.getObjectId());
+          const candidates = [
+            ...msg.attachments.map((a) => ({ name: a.name, contentType: a.contentType, url: a.url })),
+            ...msg.files.map((a) => ({ name: a.name, contentType: a.contentType, url: a.url })),
+          ].filter((a) => a.url);
+          if (candidates.length === 0) {
+            return { error: 'That message has no downloadable file attachments. (Inline images use get-teams-image.)' };
+          }
+          const chosen =
+            (name && candidates.find((a) => nameMatches(a.name))) ||
+            (!name ? candidates[0] : undefined);
+          if (!chosen || !chosen.url) {
+            return { error: `No matching attachment. Available: ${candidates.map((a) => a.name).join('; ')}` };
+          }
+          let base64: string;
+          let mediaType: string;
+          if (chosen.url.startsWith('https://graph.microsoft.com/')) {
+            ({ base64, mediaType } = await client.getHostedContentRaw(chosen.url));
+          } else {
+            ({ base64, mediaType } = await client.downloadReferenceAttachment(chosen.url));
+          }
+          return {
+            success: true, source, chatId, messageId, name: chosen.name ?? 'attachment', mediaType,
+            bytes: Math.floor((base64.length * 3) / 4),
+            _modelContent: [partForMedia(base64, mediaType, chosen.name ?? undefined)],
+          };
+        } catch (err) {
+          return errResult(err);
+        }
+      },
+    },
+
+    {
       name: 'create-group-chat',
       description:
         'Create a new Teams group chat with the given members (plus the signed-in user) and optionally send an initial message. Members may be emails, UPNs, AAD ids, or unambiguous names. Requires at least 2 other members.',
@@ -1109,6 +1251,8 @@ export const ALL_TOOL_NAMES = [
   'set-presence',
   'set-status-message',
   'invoke-card-action',
+  'get-teams-image',
+  'get-attachment',
   'list-folders',
   'list-mail',
   'get-mail',

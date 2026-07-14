@@ -220,6 +220,8 @@ function registerEnabledTools(api: PluginAPI): void {
     'set-presence': 'setPresence',
     'set-status-message': 'setStatusMessage',
     'invoke-card-action': 'invokeCardAction',
+    'get-teams-image': 'getTeamsImage',
+    'get-attachment': 'getAttachment',
     'list-folders': 'listFolders',
     'list-mail': 'listMail',
     'get-mail': 'getMail',

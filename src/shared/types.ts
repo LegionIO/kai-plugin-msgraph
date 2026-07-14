@@ -423,6 +423,8 @@ export interface ToolPermissions {
   setPresence: boolean;
   setStatusMessage: boolean;
   invokeCardAction: boolean;
+  getTeamsImage: boolean;
+  getAttachment: boolean;
   listFolders: boolean;
   listMail: boolean;
   getMail: boolean;
@@ -452,6 +454,8 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
   setPresence: true,
   setStatusMessage: true,
   invokeCardAction: false,
+  getTeamsImage: true,
+  getAttachment: true,
   listFolders: true,
   listMail: true,
   getMail: true,

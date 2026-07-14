@@ -295,8 +295,8 @@ export class GraphClient {
     return { messages: r.value, nextLink: r['@odata.nextLink'] ?? null };
   }
 
-  /** Fetch an auth-protected Graph hostedContents/$value URL and return a data URL. */
-  async getHostedContent(url: string): Promise<string> {
+  /** Fetch an auth-protected Graph hostedContents/$value URL as raw base64 + media type. */
+  async getHostedContentRaw(url: string): Promise<{ base64: string; mediaType: string }> {
     if (!url.startsWith('https://graph.microsoft.com/')) {
       throw new GraphApiError(`Refusing non-Graph hosted content URL`, 0);
     }
@@ -304,8 +304,14 @@ export class GraphClient {
     const resp = await this.fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     if (!resp.ok) throw new GraphApiError(`GET hostedContent → ${resp.status}`, resp.status);
     const buf = Buffer.from(await resp.arrayBuffer());
-    const ct = resp.headers.get('content-type') || 'image/png';
-    return `data:${ct};base64,${buf.toString('base64')}`;
+    const mediaType = resp.headers.get('content-type') || 'image/png';
+    return { base64: buf.toString('base64'), mediaType };
+  }
+
+  /** Fetch an auth-protected Graph hostedContents/$value URL and return a data URL. */
+  async getHostedContent(url: string): Promise<string> {
+    const { base64, mediaType } = await this.getHostedContentRaw(url);
+    return `data:${mediaType};base64,${base64}`;
   }
 
   async sendMessage(
@@ -798,22 +804,54 @@ export class GraphClient {
     };
   }
 
+  /** Fetch a single mail attachment as raw base64 (contentBytes for fileAttachment). */
+  async getMailAttachmentRaw(
+    messageId: string,
+    attachmentId: string,
+  ): Promise<{ contentId: string | null; base64: string; mediaType: string; name: string }> {
+    const a = await this.request<RawAttachment & { contentBytes?: string }>(
+      'GET',
+      `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
+    );
+    return {
+      contentId: a.contentId ?? null,
+      base64: a.contentBytes ?? '',
+      mediaType: a.contentType || 'application/octet-stream',
+      name: a.name ?? 'attachment',
+    };
+  }
+
   /** Fetch a single attachment fully (contentId + contentBytes for fileAttachment). */
   async getMailAttachment(
     messageId: string,
     attachmentId: string,
   ): Promise<{ contentId: string | null; dataUrl: string; name: string }> {
-    const a = await this.request<RawAttachment & { contentBytes?: string }>(
-      'GET',
-      `/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`,
-    );
-    const ct = a.contentType || 'application/octet-stream';
-    const bytes = a.contentBytes ?? '';
-    return {
-      contentId: a.contentId ?? null,
-      dataUrl: `data:${ct};base64,${bytes}`,
-      name: a.name ?? 'attachment',
-    };
+    const { contentId, base64, mediaType, name } = await this.getMailAttachmentRaw(messageId, attachmentId);
+    return { contentId, dataUrl: `data:${mediaType};base64,${base64}`, name };
+  }
+
+  /**
+   * Download a Teams "reference" attachment (a SharePoint/OneDrive file) by its
+   * contentUrl, via the Graph shares API. Returns raw base64 + media type.
+   * NOTE: verified opportunistically — falls back through a couple of shapes.
+   */
+  async downloadReferenceAttachment(
+    contentUrl: string,
+  ): Promise<{ base64: string; mediaType: string }> {
+    // Graph "shares" encoding: base64url of the full URL, prefixed with "u!".
+    const b64 = Buffer.from(contentUrl, 'utf8')
+      .toString('base64')
+      .replace(/=+$/, '')
+      .replace(/\//g, '_')
+      .replace(/\+/g, '-');
+    const shareId = `u!${b64}`;
+    const token = await ensureAccessToken(this.api, { allowInteractive: false });
+    const url = `${GRAPH_BASE_URL}/shares/${encodeURIComponent(shareId)}/driveItem/content`;
+    const resp = await this.fetch(url, { headers: { Authorization: `Bearer ${token}` }, redirect: 'follow' });
+    if (!resp.ok) throw new GraphApiError(`GET shared driveItem → ${resp.status}`, resp.status);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    const mediaType = resp.headers.get('content-type') || 'application/octet-stream';
+    return { base64: buf.toString('base64'), mediaType };
   }
 
   async patchMail(messageId: string, patch: { isRead?: boolean; flag?: 'flagged' | 'complete' | 'notFlagged' }): Promise<void> {

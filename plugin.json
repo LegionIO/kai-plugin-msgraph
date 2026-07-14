@@ -1,7 +1,7 @@
 {
   "name": "msgraph",
   "displayName": "Teams & Outlook",
-  "version": "0.4.9",
+  "version": "0.5.0",
   "description": "Microsoft Teams chat + Outlook mail via Graph API — read/send/search messages and email with real-time push and AI tooling",
   "icon": {
     "lucide": "message-square-more"
@@ -78,6 +78,14 @@
             "default": true
           },
           "reactToMessage": {
+            "type": "boolean",
+            "default": true
+          },
+          "getTeamsImage": {
+            "type": "boolean",
+            "default": true
+          },
+          "getAttachment": {
             "type": "boolean",
             "default": true
           },
