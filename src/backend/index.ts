@@ -1474,7 +1474,7 @@ export async function activate(api: PluginAPI): Promise<void> {
 
   api.state.replace(initialState() as unknown as Record<string, unknown>);
 
-  mediaServer.start();
+  await mediaServer.start();
   photoCache.init(api);
   hostedContentCache.init(api, getPreferences(api).imageCacheMaxEntries);
   initMail(api, (allowInteractive = false) => ensureAuthenticated(api, allowInteractive));

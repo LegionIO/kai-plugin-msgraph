@@ -61,9 +61,13 @@ function isHostedUrl(key: string): boolean {
 export function published(): Record<string, string | null> {
   const out: Record<string, string | null> = {};
   const base = mediaServer.baseUrl();
+  // Never inline image bytes into UI state — that balloons the ui-state-update
+  // broadcast to megabytes. If the media server isn't up yet, omit the entry so
+  // the renderer waits; a later publish (once base is set) fills it with a URL.
+  if (!base) return out;
   for (const [k, v] of cache) {
     if (!isHostedUrl(k)) continue;
-    out[k] = v === null ? null : base ? mediaServer.urlFor('hosted', k) : v;
+    out[k] = v === null ? null : mediaServer.urlFor('hosted', k);
   }
   return out;
 }

@@ -1,9 +1,9 @@
 /**
  * Localhost HTTP server that serves cached profile photos and hosted-content
  * images so the renderer receives short URLs instead of multi-KB data-URLs
- * over IPC. Bound to 127.0.0.1 with a random path prefix; falls back cleanly
- * (baseUrl() returns null) if the port can't be opened, in which case callers
- * publish data-URLs as before.
+ * over IPC. Bound to 127.0.0.1 with a random path prefix. If the port can't be
+ * opened (baseUrl() stays null), affected images simply don't render — callers
+ * never inline the bytes into UI state, so the broadcast size stays bounded.
  */
 
 import { createServer, type Server } from 'http';
@@ -39,8 +39,8 @@ function decode(dataUrl: string): { mime: string; body: Buffer } | null {
   return { mime, body };
 }
 
-export function start(): void {
-  if (server) return;
+export function start(): Promise<void> {
+  if (server) return Promise.resolve();
   prefix = randomBytes(12).toString('hex');
   const srv = createServer((req, res) => {
     try {
@@ -75,7 +75,7 @@ export function start(): void {
     }
   });
   srv.on('error', (err) => {
-    getLogger().warn(`media-server: ${err}; falling back to data-URLs`);
+    getLogger().warn(`media-server: ${err}; hosted images will not render`);
     base = null;
     server = null;
   });
@@ -87,6 +87,16 @@ export function start(): void {
     }
   });
   server = srv;
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    srv.on('error', done);
+    srv.on('listening', done);
+  });
 }
 
 export function stop(): void {
