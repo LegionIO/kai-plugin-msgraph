@@ -533,6 +533,25 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           },
           contentType: { type: 'string', enum: ['text', 'html'] },
           replyToMessageId: { type: 'string', description: 'Quote-reply to a message in the resulting 1:1 chat.' },
+          images: {
+            type: 'array',
+            description: 'Inline images to embed as hostedContents.',
+            items: {
+              type: 'object',
+              properties: {
+                contentType: { type: 'string', description: 'e.g. image/png' },
+                contentBytes: { type: 'string', description: 'Base64-encoded image bytes (no data: prefix).' },
+                name: { type: 'string' },
+              },
+              required: ['contentType', 'contentBytes'],
+            },
+          },
+          imagePaths: {
+            type: 'array',
+            description:
+              'Local image file paths to attach inline (embedded as hostedContents). Preferred over `images` when the image is already a file on disk — avoids base64 round-tripping. Supports ~ expansion; MIME type is sniffed automatically. Only image files are supported here today.',
+            items: { type: 'string' },
+          },
         },
         required: ['to', 'text'],
         additionalProperties: false,
@@ -540,15 +559,31 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       execute: async (input) => {
         try {
           const client = await ensureAuthenticated();
-          const { to, text, contentType, replyToMessageId } = input as {
+          const { to, text, contentType, replyToMessageId, images, imagePaths } = input as {
             to: string;
             text: string;
             contentType?: 'text' | 'html';
             replyToMessageId?: string;
+            images?: Array<{ contentType: string; contentBytes: string; name?: string }>;
+            imagePaths?: string[];
           };
           const user = await resolveUser(client, to);
           const chat = await client.getOrCreateOneOnOne(user.id);
-          const body = await buildOutgoing(client, chat.id, { text, contentType, replyToMessageId });
+          const imgs: PendingImage[] = (images ?? []).map((i, idx) => ({
+            id: `img${idx}`,
+            contentType: i.contentType,
+            contentBytes: i.contentBytes,
+            name: i.name,
+          }));
+          if (imagePaths?.length) {
+            imgs.push(...(await readImagePaths(imagePaths, imgs.length)));
+          }
+          const body = await buildOutgoing(client, chat.id, {
+            text,
+            contentType,
+            replyToMessageId,
+            images: imgs.length ? imgs : undefined,
+          });
           const m = await client.sendMessageRaw(chat.id, body);
           return {
             success: true,
