@@ -13,8 +13,83 @@ import {
 } from './ic3-client.js';
 import { getLogger } from './logger-singleton.js';
 import * as hostedContentCache from './hosted-content-cache.js';
+import { readFile } from 'fs/promises';
+import { homedir } from 'os';
+import { resolve, extname, basename } from 'path';
 
 const AVAIL_VALUES = ['Available', 'Busy', 'DoNotDisturb', 'BeRightBack', 'Away', 'Offline'] as const;
+
+/** Extension → image MIME type. Only image types are handled today; non-image
+ * file attachments require a OneDrive upload flow that is not yet implemented. */
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
+  '.ico': 'image/x-icon',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
+};
+
+/** Expand a leading `~` / `~/` to the user's home directory, then make absolute. */
+function expandPath(p: string): string {
+  let out = p;
+  if (out === '~') out = homedir();
+  else if (out.startsWith('~/')) out = resolve(homedir(), out.slice(2));
+  return resolve(out);
+}
+
+/** Sniff the image MIME type from magic bytes, falling back to the extension. */
+function sniffImageMime(buf: Buffer, ext: string): string | null {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
+  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp';
+  return IMAGE_MIME_BY_EXT[ext.toLowerCase()] ?? null;
+}
+
+/** Read image files from disk and turn them into PendingImage entries for the
+ * hostedContents pipeline. Throws with a clear message on missing/non-image files. */
+async function readImagePaths(paths: string[], startIndex: number): Promise<PendingImage[]> {
+  const out: PendingImage[] = [];
+  for (let i = 0; i < paths.length; i++) {
+    const raw = paths[i];
+    const abs = expandPath(raw);
+    let buf: Buffer;
+    try {
+      buf = await readFile(abs);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      throw new Error(
+        code === 'ENOENT'
+          ? `Image not found: ${raw} (resolved to ${abs})`
+          : code === 'EISDIR'
+            ? `Image path is a directory, not a file: ${raw}`
+            : `Could not read image ${raw}: ${(e as Error).message}`,
+      );
+    }
+    const ext = extname(abs);
+    const mime = sniffImageMime(buf, ext);
+    if (!mime) {
+      throw new Error(
+        `${raw} is not a recognized image (only images are supported via imagePaths today; non-image file attachments are not yet supported).`,
+      );
+    }
+    out.push({
+      id: `img${startIndex + i}`,
+      contentType: mime,
+      contentBytes: buf.toString('base64'),
+      name: basename(abs),
+    });
+  }
+  return out;
+}
 
 interface CardAction {
   id: string | null;
@@ -390,6 +465,12 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
               required: ['contentType', 'contentBytes'],
             },
           },
+          imagePaths: {
+            type: 'array',
+            description:
+              'Local image file paths to attach inline (embedded as hostedContents). Preferred over `images` when the image is already a file on disk — avoids base64 round-tripping. Supports ~ expansion; MIME type is sniffed automatically. Only image files are supported here today.',
+            items: { type: 'string' },
+          },
         },
         required: ['chatId', 'text'],
         additionalProperties: false,
@@ -397,20 +478,29 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       execute: async (input) => {
         try {
           const client = await ensureAuthenticated();
-          const { chatId, text, contentType, replyToMessageId, images } = input as {
+          const { chatId, text, contentType, replyToMessageId, images, imagePaths } = input as {
             chatId: string;
             text: string;
             contentType?: 'text' | 'html';
             replyToMessageId?: string;
             images?: Array<{ contentType: string; contentBytes: string; name?: string }>;
+            imagePaths?: string[];
           };
-          const imgs: PendingImage[] | undefined = images?.map((i, idx) => ({
+          const imgs: PendingImage[] = (images ?? []).map((i, idx) => ({
             id: `img${idx}`,
             contentType: i.contentType,
             contentBytes: i.contentBytes,
             name: i.name,
           }));
-          const body = await buildOutgoing(client, chatId, { text, contentType, replyToMessageId, images: imgs });
+          if (imagePaths?.length) {
+            imgs.push(...(await readImagePaths(imagePaths, imgs.length)));
+          }
+          const body = await buildOutgoing(client, chatId, {
+            text,
+            contentType,
+            replyToMessageId,
+            images: imgs.length ? imgs : undefined,
+          });
           const m = await client.sendMessageRaw(chatId, body);
           return {
             success: true,
