@@ -148,6 +148,45 @@ async function prepareFileAttachments(client: GraphClient, paths: string[]): Pro
   return out;
 }
 
+/** Teams caps the whole chat-message payload at 4 MiB. Inline images ride in the
+ * POST body as base64 hostedContents, so their combined base64 size (plus the body
+ * and JSON envelope) must stay under it. Budget conservatively to leave headroom. */
+const INLINE_IMAGE_BUDGET_BYTES = 3_900_000;
+
+/** Map an image MIME type to a file extension for a synthesized filename. */
+function imageExtForMime(mime: string): string {
+  const m: Record<string, string> = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp',
+    'image/bmp': 'bmp', 'image/svg+xml': 'svg', 'image/tiff': 'tif', 'image/heic': 'heic', 'image/heif': 'heif',
+  };
+  return m[mime] ?? 'png';
+}
+
+/**
+ * Keep inline images under Teams' 4 MiB per-message payload cap. If their combined
+ * base64 size exceeds the budget, offload ALL of them to OneDrive and return them as
+ * file-card attachments instead so the message still sends. (All-or-nothing keeps the
+ * result predictable rather than silently sending some inline and some as cards.)
+ */
+async function fitInlineImages(
+  client: GraphClient,
+  images: PendingImage[],
+): Promise<{ images: PendingImage[]; fileAttachments: FileAttachment[] }> {
+  const total = images.reduce((n, img) => n + img.contentBytes.length, 0);
+  if (images.length === 0 || total <= INLINE_IMAGE_BUDGET_BYTES) {
+    return { images, fileAttachments: [] };
+  }
+  const fileAttachments: FileAttachment[] = [];
+  for (const img of images) {
+    const bytes = Buffer.from(img.contentBytes, 'base64');
+    const name = img.name && img.name.trim() ? img.name : `image-${randomUUID().slice(0, 8)}.${imageExtForMime(img.contentType)}`;
+    const item = await client.uploadDriveFile(name, bytes, img.contentType);
+    const contentUrl = await client.createShareLink(item.id);
+    fileAttachments.push({ id: randomUUID(), contentUrl, name: item.name });
+  }
+  return { images: [], fileAttachments };
+}
+
 interface CardAction {
   id: string | null;
   title: string | null;
@@ -520,7 +559,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           },
           images: {
             type: 'array',
-            description: 'Inline images to embed as hostedContents.',
+            description: 'Inline images to embed as hostedContents. If the combined image size would exceed Teams\' ~4MB per-message limit, they are automatically uploaded and sent as file-card attachments instead.',
             items: {
               type: 'object',
               properties: {
@@ -568,19 +607,23 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           if (imagePaths?.length) {
             imgs.push(...(await readImagePaths(imagePaths, imgs.length)));
           }
-          const fileAttachments = filePaths?.length ? await prepareFileAttachments(client, filePaths) : undefined;
+          const explicitFiles = filePaths?.length ? await prepareFileAttachments(client, filePaths) : [];
+          // Offload inline images to file cards if they'd blow Teams' 4MiB message cap.
+          const fitted = await fitInlineImages(client, imgs);
+          const fileAttachments = [...explicitFiles, ...fitted.fileAttachments];
           const body = await buildOutgoing(client, chatId, {
             text,
             contentType,
             replyToMessageId,
-            images: imgs.length ? imgs : undefined,
-            fileAttachments,
+            images: fitted.images.length ? fitted.images : undefined,
+            fileAttachments: fileAttachments.length ? fileAttachments : undefined,
           });
           const m = await client.sendMessageRaw(chatId, body);
           return {
             success: true,
             chatId,
             messageId: m.id,
+            imagesOffloaded: fitted.fileAttachments.length || undefined,
             createdDateTime: m.createdDateTime ?? null,
           };
         } catch (err) {
@@ -610,7 +653,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           replyToMessageId: { type: 'string', description: 'Quote-reply to a message in the resulting 1:1 chat.' },
           images: {
             type: 'array',
-            description: 'Inline images to embed as hostedContents.',
+            description: 'Inline images to embed as hostedContents. If the combined image size would exceed Teams\' ~4MB per-message limit, they are automatically uploaded and sent as file-card attachments instead.',
             items: {
               type: 'object',
               properties: {
@@ -660,13 +703,16 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           if (imagePaths?.length) {
             imgs.push(...(await readImagePaths(imagePaths, imgs.length)));
           }
-          const fileAttachments = filePaths?.length ? await prepareFileAttachments(client, filePaths) : undefined;
+          const explicitFiles = filePaths?.length ? await prepareFileAttachments(client, filePaths) : [];
+          // Offload inline images to file cards if they'd blow Teams' 4MiB message cap.
+          const fitted = await fitInlineImages(client, imgs);
+          const fileAttachments = [...explicitFiles, ...fitted.fileAttachments];
           const body = await buildOutgoing(client, chat.id, {
             text,
             contentType,
             replyToMessageId,
-            images: imgs.length ? imgs : undefined,
-            fileAttachments,
+            images: fitted.images.length ? fitted.images : undefined,
+            fileAttachments: fileAttachments.length ? fileAttachments : undefined,
           });
           const m = await client.sendMessageRaw(chat.id, body);
           return {
@@ -678,6 +724,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             },
             chatId: chat.id,
             messageId: m.id,
+            imagesOffloaded: fitted.fileAttachments.length || undefined,
             createdDateTime: m.createdDateTime ?? null,
           };
         } catch (err) {
