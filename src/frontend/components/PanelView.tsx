@@ -878,7 +878,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string | null }) {
   const gutterWidth = 12 + String(lineCount).length * 7;
   return (
     <div
-      className="my-1.5 rounded-lg border border-border bg-card text-foreground overflow-hidden"
+      className="my-1.5 w-full min-w-0 rounded-lg border border-border bg-card text-foreground overflow-hidden"
       style={{ whiteSpace: 'normal' }}
     >
       <div className="flex items-center justify-between px-2.5 py-1 border-b border-border/60 bg-muted/40">
@@ -915,7 +915,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string | null }) {
         </div>
         <code
           style={{ whiteSpace: 'pre', display: 'block' }}
-          className="px-3 py-1.5 flex-1"
+          className="px-3 py-1.5"
           dangerouslySetInnerHTML={{ __html: html }}
         />
       </div>
@@ -1059,7 +1059,7 @@ function MessageBubble({
         )}
       </div>
       <div
-        className="relative flex flex-col"
+        className="relative flex flex-col min-w-0"
         style={{ maxWidth: '75%', alignItems: m.fromMe ? 'flex-end' : 'flex-start' }}
       >
         {showHeader && !m.fromMe && m.fromName && (
@@ -1075,7 +1075,7 @@ function MessageBubble({
             e.preventDefault();
             onOpenPicker();
           }}
-          className={`relative rounded-2xl text-sm whitespace-pre-wrap break-words ${
+          className={`relative max-w-full min-w-0 rounded-2xl text-sm whitespace-pre-wrap break-words ${
             imageOnly ? 'p-0.5' : 'px-3 py-1.5'
           } ${
             m.fromMe
