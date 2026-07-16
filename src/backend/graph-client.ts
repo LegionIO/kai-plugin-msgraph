@@ -900,8 +900,9 @@ export class GraphClient {
       for (let attempt = 0; attempt < 3; attempt++) {
         resp = await this.fetch(uploadUrl, {
           method: 'PUT',
+          // Content-Length is a forbidden header in the runtime's fetch (it is
+          // derived from the body); setting it throws ERR_INVALID_ARGUMENT.
           headers: {
-            'Content-Length': String(chunk.length),
             'Content-Range': `bytes ${offset}-${end - 1}/${total}`,
           },
           body: new Uint8Array(chunk),
