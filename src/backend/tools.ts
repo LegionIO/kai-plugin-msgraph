@@ -1,7 +1,7 @@
 import type { PluginAPI, GraphUser, GraphChatType, MailAddress } from '../shared/types.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
-import { buildMessageBody, withMessageRef, type PendingImage } from '../shared/markdown.js';
+import { buildMessageBody, withMessageRef, withFileReferences, type PendingImage } from '../shared/markdown.js';
 import {
   setForcedAvailability,
   setStatusNote,
@@ -16,11 +16,11 @@ import * as hostedContentCache from './hosted-content-cache.js';
 import { readFile } from 'fs/promises';
 import { homedir } from 'os';
 import { resolve, extname, basename } from 'path';
+import { randomUUID } from 'crypto';
 
 const AVAIL_VALUES = ['Available', 'Busy', 'DoNotDisturb', 'BeRightBack', 'Away', 'Offline'] as const;
 
-/** Extension → image MIME type. Only image types are handled today; non-image
- * file attachments require a OneDrive upload flow that is not yet implemented. */
+/** Extension → image MIME type, used to sniff images for the hostedContents path. */
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -36,12 +36,57 @@ const IMAGE_MIME_BY_EXT: Record<string, string> = {
   '.heif': 'image/heif',
 };
 
+/** Extension → MIME for common non-image file attachments. Falls back to
+ * application/octet-stream; the value is only advisory for the upload PUT. */
+const FILE_MIME_BY_EXT: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.xml': 'application/xml',
+  '.html': 'text/html',
+  '.zip': 'application/zip',
+  '.gz': 'application/gzip',
+  '.tar': 'application/x-tar',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.dmg': 'application/x-apple-diskimage',
+};
+
 /** Expand a leading `~` / `~/` to the user's home directory, then make absolute. */
 function expandPath(p: string): string {
   let out = p;
   if (out === '~') out = homedir();
   else if (out.startsWith('~/')) out = resolve(homedir(), out.slice(2));
   return resolve(out);
+}
+
+/** Read a local file with ~ expansion and clear ENOENT/EISDIR errors. */
+async function readLocalFile(raw: string): Promise<{ abs: string; buf: Buffer; name: string; ext: string }> {
+  const abs = expandPath(raw);
+  let buf: Buffer;
+  try {
+    buf = await readFile(abs);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    throw new Error(
+      code === 'ENOENT'
+        ? `File not found: ${raw} (resolved to ${abs})`
+        : code === 'EISDIR'
+          ? `Path is a directory, not a file: ${raw}`
+          : `Could not read ${raw}: ${(e as Error).message}`,
+    );
+  }
+  return { abs, buf, name: basename(abs), ext: extname(abs) };
 }
 
 /** Sniff the image MIME type from magic bytes, falling back to the extension. */
@@ -54,39 +99,51 @@ function sniffImageMime(buf: Buffer, ext: string): string | null {
   return IMAGE_MIME_BY_EXT[ext.toLowerCase()] ?? null;
 }
 
+/** Best-effort MIME for any file: image sniff first, then extension map, else octet-stream. */
+function guessFileMime(buf: Buffer, ext: string): string {
+  return sniffImageMime(buf, ext) ?? FILE_MIME_BY_EXT[ext.toLowerCase()] ?? 'application/octet-stream';
+}
+
 /** Read image files from disk and turn them into PendingImage entries for the
  * hostedContents pipeline. Throws with a clear message on missing/non-image files. */
 async function readImagePaths(paths: string[], startIndex: number): Promise<PendingImage[]> {
   const out: PendingImage[] = [];
   for (let i = 0; i < paths.length; i++) {
     const raw = paths[i];
-    const abs = expandPath(raw);
-    let buf: Buffer;
-    try {
-      buf = await readFile(abs);
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      throw new Error(
-        code === 'ENOENT'
-          ? `Image not found: ${raw} (resolved to ${abs})`
-          : code === 'EISDIR'
-            ? `Image path is a directory, not a file: ${raw}`
-            : `Could not read image ${raw}: ${(e as Error).message}`,
-      );
-    }
-    const ext = extname(abs);
+    const { buf, name, ext } = await readLocalFile(raw);
     const mime = sniffImageMime(buf, ext);
     if (!mime) {
       throw new Error(
-        `${raw} is not a recognized image (only images are supported via imagePaths today; non-image file attachments are not yet supported).`,
+        `${raw} is not a recognized image. Use filePaths to attach non-image files.`,
       );
     }
     out.push({
       id: `img${startIndex + i}`,
       contentType: mime,
       contentBytes: buf.toString('base64'),
-      name: basename(abs),
+      name,
     });
+  }
+  return out;
+}
+
+/** A file uploaded to OneDrive and ready to attach as a Teams `reference` card. */
+interface FileAttachment {
+  id: string;
+  contentUrl: string;
+  name: string;
+}
+
+/** Upload each local file to OneDrive, create an org-view share link, and return
+ * the reference-attachment descriptors. Renders as file cards in Teams. */
+async function prepareFileAttachments(client: GraphClient, paths: string[]): Promise<FileAttachment[]> {
+  const out: FileAttachment[] = [];
+  for (const raw of paths) {
+    const { buf, name, ext } = await readLocalFile(raw);
+    const mime = guessFileMime(buf, ext);
+    const item = await client.uploadDriveFile(name, buf, mime);
+    const contentUrl = await client.createShareLink(item.id);
+    out.push({ id: randomUUID(), contentUrl, name: item.name });
   }
   return out;
 }
@@ -215,7 +272,13 @@ function conciseMessage(m: ReturnType<typeof normalizeMessage>) {
 async function buildOutgoing(
   client: GraphClient,
   chatId: string,
-  input: { text: string; contentType?: 'text' | 'html'; replyToMessageId?: string; images?: PendingImage[] },
+  input: {
+    text: string;
+    contentType?: 'text' | 'html';
+    replyToMessageId?: string;
+    images?: PendingImage[];
+    fileAttachments?: FileAttachment[];
+  },
 ): Promise<Record<string, unknown>> {
   let body = input.contentType
     ? { body: { contentType: input.contentType, content: input.text } }
@@ -238,6 +301,9 @@ async function buildOutgoing(
       messagePreview: preview,
       messageSender: sender ? { user: { displayName: sender } } : null,
     });
+  }
+  if (input.fileAttachments?.length) {
+    body = withFileReferences(body, input.fileAttachments);
   }
   return body;
 }
@@ -468,7 +534,13 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           imagePaths: {
             type: 'array',
             description:
-              'Local image file paths to attach inline (embedded as hostedContents). Preferred over `images` when the image is already a file on disk — avoids base64 round-tripping. Supports ~ expansion; MIME type is sniffed automatically. Only image files are supported here today.',
+              'Local image file paths to attach inline (embedded as hostedContents). Preferred over `images` when the image is already a file on disk — avoids base64 round-tripping. Supports ~ expansion; MIME type is sniffed automatically. For non-image files use filePaths.',
+            items: { type: 'string' },
+          },
+          filePaths: {
+            type: 'array',
+            description:
+              'Local file paths to attach as Teams file cards (any type, any size — PDFs, docs, archives, etc.). Supports ~ expansion. Each file is uploaded to your OneDrive "Microsoft Teams Chat Files" folder, shared with an organization view link, and attached so recipients can open it. For inline images prefer imagePaths.',
             items: { type: 'string' },
           },
         },
@@ -478,13 +550,14 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       execute: async (input) => {
         try {
           const client = await ensureAuthenticated();
-          const { chatId, text, contentType, replyToMessageId, images, imagePaths } = input as {
+          const { chatId, text, contentType, replyToMessageId, images, imagePaths, filePaths } = input as {
             chatId: string;
             text: string;
             contentType?: 'text' | 'html';
             replyToMessageId?: string;
             images?: Array<{ contentType: string; contentBytes: string; name?: string }>;
             imagePaths?: string[];
+            filePaths?: string[];
           };
           const imgs: PendingImage[] = (images ?? []).map((i, idx) => ({
             id: `img${idx}`,
@@ -495,11 +568,13 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           if (imagePaths?.length) {
             imgs.push(...(await readImagePaths(imagePaths, imgs.length)));
           }
+          const fileAttachments = filePaths?.length ? await prepareFileAttachments(client, filePaths) : undefined;
           const body = await buildOutgoing(client, chatId, {
             text,
             contentType,
             replyToMessageId,
             images: imgs.length ? imgs : undefined,
+            fileAttachments,
           });
           const m = await client.sendMessageRaw(chatId, body);
           return {
@@ -549,7 +624,13 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           imagePaths: {
             type: 'array',
             description:
-              'Local image file paths to attach inline (embedded as hostedContents). Preferred over `images` when the image is already a file on disk — avoids base64 round-tripping. Supports ~ expansion; MIME type is sniffed automatically. Only image files are supported here today.',
+              'Local image file paths to attach inline (embedded as hostedContents). Preferred over `images` when the image is already a file on disk — avoids base64 round-tripping. Supports ~ expansion; MIME type is sniffed automatically. For non-image files use filePaths.',
+            items: { type: 'string' },
+          },
+          filePaths: {
+            type: 'array',
+            description:
+              'Local file paths to attach as Teams file cards (any type, any size — PDFs, docs, archives, etc.). Supports ~ expansion. Each file is uploaded to your OneDrive "Microsoft Teams Chat Files" folder, shared with an organization view link, and attached so the recipient can open it. For inline images prefer imagePaths.',
             items: { type: 'string' },
           },
         },
@@ -559,13 +640,14 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       execute: async (input) => {
         try {
           const client = await ensureAuthenticated();
-          const { to, text, contentType, replyToMessageId, images, imagePaths } = input as {
+          const { to, text, contentType, replyToMessageId, images, imagePaths, filePaths } = input as {
             to: string;
             text: string;
             contentType?: 'text' | 'html';
             replyToMessageId?: string;
             images?: Array<{ contentType: string; contentBytes: string; name?: string }>;
             imagePaths?: string[];
+            filePaths?: string[];
           };
           const user = await resolveUser(client, to);
           const chat = await client.getOrCreateOneOnOne(user.id);
@@ -578,11 +660,13 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           if (imagePaths?.length) {
             imgs.push(...(await readImagePaths(imagePaths, imgs.length)));
           }
+          const fileAttachments = filePaths?.length ? await prepareFileAttachments(client, filePaths) : undefined;
           const body = await buildOutgoing(client, chat.id, {
             text,
             contentType,
             replyToMessageId,
             images: imgs.length ? imgs : undefined,
+            fileAttachments,
           });
           const m = await client.sendMessageRaw(chat.id, body);
           return {

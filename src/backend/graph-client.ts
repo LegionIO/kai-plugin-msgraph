@@ -854,6 +854,89 @@ export class GraphClient {
     return { base64: buf.toString('base64'), mediaType };
   }
 
+  /**
+   * Upload a file to the signed-in user's OneDrive "Microsoft Teams Chat Files"
+   * folder and return the drive item. Small files (≤4MB) use a single PUT; larger
+   * files use a resumable upload session (10MiB chunks). Uses Files.ReadWrite.All
+   * from the Office .default token. Raw bytes → bypasses request()'s JSON encoding.
+   */
+  async uploadDriveFile(name: string, bytes: Buffer, contentType: string): Promise<{ id: string; webUrl: string; name: string }> {
+    const SIMPLE_MAX = 4 * 1024 * 1024;
+    const folder = 'Microsoft Teams Chat Files';
+    const itemPath = `/me/drive/root:/${encodeURIComponent(folder)}/${encodeURIComponent(name)}`;
+
+    if (bytes.length <= SIMPLE_MAX) {
+      const token = await ensureAccessToken(this.api, { allowInteractive: this.allowInteractive });
+      const url = `${GRAPH_BASE_URL}${itemPath}:/content?@microsoft.graph.conflictBehavior=rename`;
+      const resp = await this.fetch(url, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': contentType },
+        body: new Uint8Array(bytes),
+      });
+      if (!resp.ok) {
+        let body: unknown; try { body = await resp.json(); } catch { /* ignore */ }
+        throw new GraphApiError(`PUT drive content → ${resp.status}`, resp.status, body);
+      }
+      const item = await resp.json() as { id: string; webUrl: string; name: string };
+      return { id: item.id, webUrl: item.webUrl, name: item.name };
+    }
+
+    // Resumable upload session for large files.
+    const session = await this.request<{ uploadUrl: string }>(
+      'POST',
+      `${itemPath}:/createUploadSession`,
+      { body: { item: { '@microsoft.graph.conflictBehavior': 'rename' } } },
+    );
+    const uploadUrl = session.uploadUrl;
+    const CHUNK = 10 * 1024 * 1024; // 10 MiB (multiple of 320 KiB, per Graph)
+    const total = bytes.length;
+    let offset = 0;
+    let finalItem: { id: string; webUrl: string; name: string } | null = null;
+    while (offset < total) {
+      const end = Math.min(offset + CHUNK, total);
+      const chunk = bytes.subarray(offset, end);
+      // NOTE: the pre-authorized uploadUrl must NOT carry the Graph auth header.
+      let resp: Awaited<ReturnType<Fetch>> | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        resp = await this.fetch(uploadUrl, {
+          method: 'PUT',
+          headers: {
+            'Content-Length': String(chunk.length),
+            'Content-Range': `bytes ${offset}-${end - 1}/${total}`,
+          },
+          body: new Uint8Array(chunk),
+        });
+        if (resp.status === 429 || resp.status >= 500) continue; // transient — retry
+        break;
+      }
+      if (!resp) throw new GraphApiError('upload session: no response', 0);
+      if (resp.status === 200 || resp.status === 201) {
+        finalItem = await resp.json() as { id: string; webUrl: string; name: string };
+      } else if (resp.status !== 202) {
+        let body: unknown; try { body = await resp.json(); } catch { /* ignore */ }
+        throw new GraphApiError(`upload session chunk → ${resp.status}`, resp.status, body);
+      }
+      offset = end;
+    }
+    if (!finalItem) throw new GraphApiError('upload session completed without returning the drive item', 0);
+    return { id: finalItem.id, webUrl: finalItem.webUrl, name: finalItem.name };
+  }
+
+  /**
+   * Create an organization-scoped view link for a drive item and return its
+   * webUrl. Required as the attachment contentUrl — the bare driveItem webUrl is
+   * owner-only and not openable by the recipient. (Verified live 2026-07-16.)
+   */
+  async createShareLink(itemId: string): Promise<string> {
+    const r = await this.request<{ link?: { webUrl?: string } }>(
+      'POST',
+      `/me/drive/items/${encodeURIComponent(itemId)}/createLink`,
+      { body: { type: 'view', scope: 'organization' } },
+    );
+    if (!r.link?.webUrl) throw new GraphApiError('createLink returned no webUrl', 0);
+    return r.link.webUrl;
+  }
+
   async patchMail(messageId: string, patch: { isRead?: boolean; flag?: 'flagged' | 'complete' | 'notFlagged' }): Promise<void> {
     const body: Record<string, unknown> = {};
     if (patch.isRead !== undefined) body.isRead = patch.isRead;

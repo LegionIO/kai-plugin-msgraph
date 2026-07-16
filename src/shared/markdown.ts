@@ -661,6 +661,35 @@ export interface MessageRef {
   messageSender: { user: { id?: string | null; displayName: string | null } } | null;
 }
 
+/** A file uploaded to a drive, referenced from a chat message as a file card. */
+export interface FileReference {
+  /** Fresh GUID that ties the <attachment> marker to the attachments[] entry. */
+  id: string;
+  /** Shareable URL (org-view link) the recipient can open. */
+  contentUrl: string;
+  name: string;
+}
+
+/** Append file `reference` attachments to an outgoing payload (mutates + returns).
+ * Each file gets an <attachment id> marker in the body and an attachments[] entry;
+ * a text body is upgraded to html so the markers render. */
+export function withFileReferences<T extends { body: { contentType: 'text' | 'html'; content: string }; attachments?: unknown[] }>(
+  payload: T,
+  files: FileReference[],
+): T {
+  if (files.length === 0) return payload;
+  if (payload.body.contentType === 'text') {
+    payload.body = { contentType: 'html', content: esc(payload.body.content).replace(/\n/g, '<br>') };
+  }
+  const markers = files.map((f) => `<attachment id="${escAttr(f.id)}"></attachment>`).join('');
+  payload.body.content = payload.body.content + markers;
+  payload.attachments ??= [];
+  for (const f of files) {
+    (payload.attachments as unknown[]).push({ id: f.id, contentType: 'reference', contentUrl: f.contentUrl, name: f.name });
+  }
+  return payload;
+}
+
 /** Attach a reply/forward reference to an outgoing payload (mutates + returns). */
 export function withMessageRef<T extends { body: { contentType: 'text' | 'html'; content: string }; attachments?: unknown[] }>(
   payload: T,
