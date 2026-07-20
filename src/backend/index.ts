@@ -70,6 +70,15 @@ import { DEFAULT_TOOL_PERMISSIONS } from '../shared/types.js';
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+// Set true at the top of deactivate(), reset false at the top of activate().
+// Async work started before deactivate (the startup IIFE, poll/refresh ticks)
+// resumes after `await` boundaries and would otherwise call api.state.set() on
+// a dead generation — the host throws "Plugin is no longer active". Every such
+// continuation re-checks this flag and bails. See postDeactivateSkips.
+let deactivated = false;
+// Count of continuations that bailed because the plugin was already torn down.
+// Surfaced in the plugin log so post-deactivation churn is attributable.
+let postDeactivateSkips = 0;
 let unsubConfig: (() => void) | null = null;
 let trouter: TrouterListener | null = null;
 const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -157,6 +166,21 @@ function initialState(): MsgraphPluginState {
     error: null,
     ...mailInitialState(),
   };
+}
+
+/**
+ * True once deactivate() has run. Async continuations that resume after an
+ * `await` must call this before touching api.state — the host rejects state
+ * writes from a torn-down generation. Bumps a counter + warns so the churn is
+ * visible in the plugin log.
+ */
+function isTornDown(): boolean {
+  if (deactivated) {
+    postDeactivateSkips += 1;
+    getLogger().warn(`skipped post-deactivation work (total skips this generation: ${postDeactivateSkips})`);
+    return true;
+  }
+  return false;
 }
 
 function publishAuthState(api: PluginAPI): void {
@@ -319,6 +343,7 @@ async function resolveBotNames(api: PluginAPI, botIds: Set<string>): Promise<voi
 }
 
 async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void> {
+  if (deactivated) return;
   if (!tokenCache.hasRefreshToken() && !tokenCache.isTokenValid()) return;
   const session = tokenCache.currentSession();
   api.state.set('loadingChats', true);
@@ -332,7 +357,7 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
         (error: unknown) => ({ ok: false as const, error }),
       ),
     ]);
-    if (session !== tokenCache.currentSession()) return;
+    if (deactivated || session !== tokenCache.currentSession()) return;
     const { chats: raw, nextLink } = chatPage;
     if (favoriteResult.ok) {
       favoriteChatOrders = favoriteResult.orders;
@@ -344,7 +369,7 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
     const knownIds = new Set([...raw.map((c) => c.id), ...prev.map((c) => c.id)]);
     const missingFavoriteIds = [...favoriteChatOrders.keys()].filter((id) => !knownIds.has(id));
     const favoriteFetches = await Promise.allSettled(missingFavoriteIds.map((id) => client.getChat(id)));
-    if (session !== tokenCache.currentSession()) return;
+    if (deactivated || session !== tokenCache.currentSession()) return;
     const favoriteRaw = favoriteFetches.flatMap((result) =>
       result.status === 'fulfilled' ? [result.value] : [],
     );
@@ -1499,8 +1524,10 @@ async function refreshTick(api: PluginAPI): Promise<void> {
   }
   try {
     await acquireTokenSilent(api);
+    if (isTornDown()) return;
     publishAuthState(api);
   } catch (err) {
+    if (isTornDown()) return;
     getLogger().warn(`Proactive silent refresh failed: ${err}`);
   }
 }
@@ -1511,6 +1538,10 @@ export async function activate(api: PluginAPI): Promise<void> {
   setLogger(api.log);
   const log = getLogger();
   log.info('msgraph plugin activating');
+
+  // Fresh generation — clear any teardown flag/counter left by a prior one.
+  deactivated = false;
+  postDeactivateSkips = 0;
 
   tokenCache.loadPersisted(api);
   hadValidTokenSinceLogout = tokenCache.hasRefreshToken();
@@ -1719,14 +1750,20 @@ export async function activate(api: PluginAPI): Promise<void> {
     void (async () => {
       try {
         await acquireTokenSilent(api);
+        if (isTornDown()) return;
         publishAuthState(api);
         startRealtime(api);
         startMailPoll(api);
         await loadChats(api);
-        void loadMailFolders(api).then(() => loadMailList(api, 'inbox'));
+        if (isTornDown()) return;
+        void loadMailFolders(api).then(() => {
+          if (isTornDown()) return;
+          loadMailList(api, 'inbox');
+        });
         void loadSignature(api);
         await refreshMeProfile(api);
       } catch (err) {
+        if (isTornDown()) return;
         log.warn(`Startup silent refresh failed: ${err}`);
         publishAuthState(api);
       }
@@ -1737,6 +1774,7 @@ export async function activate(api: PluginAPI): Promise<void> {
   // the active-thread reload when the push connection is live.
   const prefs = getPreferences(api);
   pollTimer = setInterval(() => {
+    if (deactivated) return;
     if (!tokenCache.hasRefreshToken()) return;
     void loadChats(api);
     const st = api.state.get() as Partial<MsgraphPluginState>;
@@ -1747,6 +1785,9 @@ export async function activate(api: PluginAPI): Promise<void> {
 }
 
 export async function deactivate(): Promise<void> {
+  // Set first: any in-flight async continuation (startup IIFE, refreshTick,
+  // poll) re-checks this via isTornDown() before writing to api.state.
+  deactivated = true;
   if (pollTimer) clearInterval(pollTimer);
   if (refreshTimer) clearInterval(refreshTimer);
   if (unsubConfig) unsubConfig();

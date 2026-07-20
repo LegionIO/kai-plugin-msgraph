@@ -26,6 +26,10 @@ type EnsureFn = (allowInteractive?: boolean) => Promise<GraphClient>;
 
 let ensureAuthenticated: EnsureFn = () => Promise.reject(new Error('mail-backend not initialised'));
 let deltaTimer: ReturnType<typeof setInterval> | null = null;
+// Set true by disposeMail(), reset false by initMail(). Async continuations
+// (loadMailFolders, runDelta) re-check this after their awaits so they don't
+// call api.state.set() on a torn-down generation ("Plugin is no longer active").
+let mailDeactivated = false;
 let mailLoadSeq = 0;
 let mailListSeq = 0;
 let mailSearchSeq = 0;
@@ -67,6 +71,7 @@ export function mailInitialState(): Pick<
 }
 
 export function initMail(api: PluginAPI, ensure: EnsureFn): void {
+  mailDeactivated = false;
   ensureAuthenticated = ensure;
   deltaCache = new DiskCache<string>(api.pluginName, 'mail-delta', { hardTtlMs: 7 * 24 * 60 * 60_000, maxEntries: 20, sync: true });
   deltaLink = deltaCache.get('inbox')?.v ?? null;
@@ -142,13 +147,14 @@ export function updateMailNavBadge(api: PluginAPI): void {
 }
 
 export async function loadMailFolders(api: PluginAPI, allowInteractive = false): Promise<void> {
+  if (mailDeactivated) return;
   if (!tokenCache.hasRefreshToken() && !tokenCache.isTokenValid()) return;
   const session = tokenCache.currentSession();
   api.state.set('loadingMailFolders', true);
   try {
     const client = await ensureAuthenticated(allowInteractive);
     const { folders: all } = await client.listMailFolders();
-    if (session !== tokenCache.currentSession()) return;
+    if (mailDeactivated || session !== tokenCache.currentSession()) return;
     const order = new Map(WELL_KNOWN_FOLDERS.map((n, i) => [n, i]));
     const sorted = [...all].sort((a, b) => {
       const ai = order.get((a.wellKnownName ?? '') as typeof WELL_KNOWN_FOLDERS[number]) ?? 99;
@@ -168,11 +174,11 @@ export async function loadMailFolders(api: PluginAPI, allowInteractive = false):
     api.state.set('mailFolders', withChildren);
     updateMailNavBadge(api);
   } catch (err) {
-    if (session === tokenCache.currentSession()) {
+    if (!mailDeactivated && session === tokenCache.currentSession()) {
       api.state.set('mailError', err instanceof Error ? err.message : String(err));
     }
   } finally {
-    if (session === tokenCache.currentSession()) api.state.set('loadingMailFolders', false);
+    if (!mailDeactivated && session === tokenCache.currentSession()) api.state.set('loadingMailFolders', false);
   }
 }
 
@@ -320,6 +326,7 @@ export function stopMailPoll(): void {
 }
 
 export function disposeMail(): void {
+  mailDeactivated = true;
   stopMailPoll();
   deltaCache?.dispose();
   senderIdCache?.dispose();
@@ -330,7 +337,7 @@ async function runDelta(api: PluginAPI): Promise<void> {
   const client = await ensureAuthenticated(false);
   const initial = deltaLink === null;
   const { changes, deltaLink: next } = await client.mailDelta('inbox', deltaLink);
-  if (session !== tokenCache.currentSession()) return;
+  if (mailDeactivated || session !== tokenCache.currentSession()) return;
   if (next) { deltaLink = next; deltaCache?.set('inbox', next); }
   if (initial) return; // first call just establishes the cursor
   const folder = st(api).activeMailFolder ?? 'inbox';
