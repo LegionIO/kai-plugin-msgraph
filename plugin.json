@@ -2,7 +2,7 @@
   "name": "msgraph",
   "displayName": "Teams & Outlook",
   "version": "0.5.11",
-  "description": "Microsoft Teams chat + Outlook mail via Graph API — read/send/search messages and email with real-time push and AI tooling",
+  "description": "Microsoft Teams chats/channels + Outlook mail via Graph API — read/send/search/edit messages and email with real-time push and AI tooling",
   "icon": {
     "lucide": "message-square-more"
   },
@@ -71,6 +71,34 @@
             "default": true
           },
           "searchMessages": {
+            "type": "boolean",
+            "default": true
+          },
+          "listTeams": {
+            "type": "boolean",
+            "default": true
+          },
+          "listChannels": {
+            "type": "boolean",
+            "default": true
+          },
+          "listChannelMessages": {
+            "type": "boolean",
+            "default": true
+          },
+          "getChannelMessage": {
+            "type": "boolean",
+            "default": true
+          },
+          "searchChannelMessages": {
+            "type": "boolean",
+            "default": true
+          },
+          "editChannelMessage": {
+            "type": "boolean",
+            "default": true
+          },
+          "deleteChannelMessage": {
             "type": "boolean",
             "default": true
           },

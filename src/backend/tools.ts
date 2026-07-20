@@ -1,4 +1,4 @@
-import type { PluginAPI, GraphUser, GraphChatType, MailAddress } from '../shared/types.js';
+import type { PluginAPI, GraphUser, GraphChatType, GraphTeam, GraphChannel, GraphMessage, MailAddress } from '../shared/types.js';
 import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
 import { buildMessageBody, withMessageRef, withFileReferences, type PendingImage } from '../shared/markdown.js';
@@ -308,6 +308,185 @@ function conciseMessage(m: ReturnType<typeof normalizeMessage>) {
   };
 }
 
+interface ChannelMessageRef {
+  teamId: string;
+  channelId: string;
+  messageId: string;
+  parentMessageId: string;
+  webUrl?: string;
+}
+
+/** Parse the canonical Teams /l/message deep link used by channel posts and replies. */
+function parseTeamsMessageUrl(raw: string): ChannelMessageRef {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('Invalid Teams message URL. Expected https://teams.microsoft.com/l/message/...');
+  }
+  const parts = url.pathname.split('/').filter(Boolean);
+  const messageIdx = parts.findIndex((p, i) => p === 'message' && parts[i - 1] === 'l');
+  if (messageIdx < 0 || !parts[messageIdx + 1] || !parts[messageIdx + 2]) {
+    throw new Error('This is not a Teams channel-message link (/l/message/{channelId}/{messageId}).');
+  }
+  const teamId = url.searchParams.get('groupId')?.trim();
+  if (!teamId) throw new Error('The Teams message link is missing its groupId (team id).');
+  const channelId = decodeURIComponent(parts[messageIdx + 1]);
+  const messageId = decodeURIComponent(parts[messageIdx + 2]);
+  const parentMessageId = url.searchParams.get('parentMessageId')?.trim() || messageId;
+  return { teamId, channelId, messageId, parentMessageId, webUrl: url.toString() };
+}
+
+function resolveChannelMessageRef(input: {
+  webUrl?: string;
+  teamId?: string;
+  channelId?: string;
+  messageId?: string;
+  parentMessageId?: string;
+}): ChannelMessageRef {
+  if (input.webUrl?.trim()) return parseTeamsMessageUrl(input.webUrl.trim());
+  const teamId = input.teamId?.trim();
+  const channelId = input.channelId?.trim();
+  const messageId = input.messageId?.trim();
+  if (!teamId || !channelId || !messageId) {
+    throw new Error('Pass webUrl, or pass teamId + channelId + messageId.');
+  }
+  return {
+    teamId,
+    channelId,
+    messageId,
+    parentMessageId: input.parentMessageId?.trim() || messageId,
+  };
+}
+
+function channelMessageOutput(
+  m: GraphMessage,
+  ref: Pick<ChannelMessageRef, 'teamId' | 'channelId' | 'parentMessageId'>,
+  myId: string | null,
+  concise: boolean,
+) {
+  const n = normalizeMessage(m, myId);
+  const base = {
+    id: m.id,
+    parentMessageId: m.replyToId || ref.parentMessageId || m.id,
+    teamId: ref.teamId,
+    channelId: ref.channelId,
+    from: n.fromName,
+    fromId: n.fromId,
+    fromMe: n.fromMe || undefined,
+    createdDateTime: n.createdDateTime,
+    lastModifiedDateTime: m.lastModifiedDateTime ?? null,
+    subject: m.subject ?? null,
+    text: n.text,
+    webUrl: m.webUrl ?? null,
+    deleted: n.deleted || undefined,
+    reactions: n.reactions.length ? n.reactions : undefined,
+  };
+  if (concise) return base;
+  return {
+    ...base,
+    contentType: n.contentType,
+    bodyContent: m.body?.content ?? '',
+    segments: n.segments,
+    mentions: m.mentions ?? [],
+    attachments: m.attachments ?? [],
+    hostedImages: n.hostedImages,
+    files: n.files,
+    cards: n.cards,
+  };
+}
+
+function channelErrResult(err: unknown): { error: string } {
+  const base = errResult(err);
+  if (/\b403\b/.test(base.error)) {
+    base.error += ' Channel operations require the signed-in Graph token to include the relevant Team.ReadBasic.All, Channel.ReadBasic.All, ChannelMessage.Read.All, or ChannelMessage.ReadWrite delegated permission. Use auth-status to inspect scopes.';
+  }
+  return base;
+}
+
+function matchesQuery(values: Array<string | null | undefined>, query?: string): boolean {
+  if (!query?.trim()) return true;
+  const q = query.trim().toLowerCase();
+  return values.some((v) => (v ?? '').toLowerCase().includes(q));
+}
+
+function pickUnique<T>(items: T[], ref: string, label: (item: T) => string, kind: string): T {
+  const q = ref.trim().toLowerCase();
+  const exact = items.filter((item) => label(item).toLowerCase() === q);
+  if (exact.length === 1) return exact[0];
+  const partial = items.filter((item) => label(item).toLowerCase().includes(q));
+  if (partial.length === 1) return partial[0];
+  const choices = (exact.length ? exact : partial).map(label);
+  if (choices.length > 1) throw new Error(`Ambiguous ${kind} "${ref}" — matches: ${choices.join(', ')}`);
+  throw new Error(`No ${kind} found matching "${ref}".`);
+}
+
+async function resolveTeam(client: GraphClient, ref: string): Promise<GraphTeam> {
+  const q = ref.trim();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(q)) return client.getTeam(q);
+  return pickUnique(await client.listJoinedTeams(), q, (t) => t.displayName ?? t.id, 'joined team');
+}
+
+async function mapConcurrent<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  }));
+  return out;
+}
+
+async function resolveChannel(
+  client: GraphClient,
+  channelRef: string,
+  teamRef?: string,
+): Promise<{ team: GraphTeam; channel: GraphChannel }> {
+  const teams = teamRef ? [await resolveTeam(client, teamRef)] : await client.listJoinedTeams();
+  if (channelRef.startsWith('19:')) {
+    if (teams.length !== 1) throw new Error('A team id or name is required when channel is supplied as an id.');
+    const channels = await client.listChannels(teams[0].id);
+    const channel = channels.find((c) => c.id === channelRef);
+    if (!channel) throw new Error(`Channel ${channelRef} is not visible in team ${teams[0].displayName ?? teams[0].id}.`);
+    return { team: teams[0], channel };
+  }
+  const nested = await mapConcurrent(teams, 4, async (team) => ({ team, channels: await client.listChannels(team.id) }));
+  const candidates = nested.flatMap(({ team, channels }) => channels.map((channel) => ({ team, channel })));
+  const q = channelRef.trim().toLowerCase();
+  const exact = candidates.filter((x) => (x.channel.displayName ?? x.channel.id).toLowerCase() === q);
+  const partial = candidates.filter((x) => (x.channel.displayName ?? x.channel.id).toLowerCase().includes(q));
+  const matches = exact.length ? exact : partial;
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new Error(
+      `Ambiguous channel "${channelRef}" — matches: ${matches.map((x) =>
+        `${x.channel.displayName ?? x.channel.id} (${x.team.displayName ?? x.team.id})`).join(', ')}`,
+    );
+  }
+  throw new Error(`No channel found matching "${channelRef}".`);
+}
+
+function namesFromTeamsUrl(webUrl: string | null): { teamName: string | null; channelName: string | null } {
+  if (!webUrl) return { teamName: null, channelName: null };
+  try {
+    const u = new URL(webUrl);
+    return { teamName: u.searchParams.get('teamName'), channelName: u.searchParams.get('channelName') };
+  } catch {
+    return { teamName: null, channelName: null };
+  }
+}
+
+const CHANNEL_MESSAGE_REF_SCHEMA = {
+  webUrl: { type: 'string', description: 'A Teams /l/message deep link. When supplied, IDs are parsed from it.' },
+  teamId: { type: 'string', description: 'Team id (the groupId in a Teams message link).' },
+  channelId: { type: 'string', description: 'Channel id, usually 19:...@thread.tacv2.' },
+  messageId: { type: 'string', description: 'Channel post or reply id.' },
+  parentMessageId: { type: 'string', description: 'Root post id when messageId identifies a reply. Omit for a root post.' },
+};
+
 async function buildOutgoing(
   client: GraphClient,
   chatId: string,
@@ -422,6 +601,330 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           };
         } catch (err) {
           return errResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'list-teams',
+      description:
+        "List or find Microsoft Teams the signed-in user has joined. Use this when a request names a team but does not provide its id.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Optional case-insensitive substring matched against team name and description.' },
+        },
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const query = (input as { query?: string } | null)?.query;
+          const teams = (await client.listJoinedTeams()).filter((t) => matchesQuery([t.displayName, t.description], query));
+          return {
+            success: true,
+            count: teams.length,
+            teams: teams.map((t) => ({
+              id: t.id,
+              name: t.displayName ?? t.id,
+              description: t.description ?? null,
+              webUrl: t.webUrl ?? null,
+              archived: t.isArchived || undefined,
+            })),
+          };
+        } catch (err) {
+          return channelErrResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'list-channels',
+      description:
+        'List or find channels visible to the signed-in user. Pass a team id/name to restrict the search, or omit it to search channels across all joined teams. Returns actionable teamId and channelId values.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          team: { type: 'string', description: 'Optional team id or unambiguous team-name substring.' },
+          query: { type: 'string', description: 'Optional case-insensitive substring matched against channel name and description.' },
+        },
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { team: teamRef, query } = (input ?? {}) as { team?: string; query?: string };
+          const teams = teamRef ? [await resolveTeam(client, teamRef)] : await client.listJoinedTeams();
+          const nested = await mapConcurrent(teams, 4, async (team) => ({
+            team,
+            channels: await client.listChannels(team.id),
+          }));
+          const channels = nested.flatMap(({ team, channels: teamChannels }) =>
+            teamChannels
+              .filter((c) => matchesQuery([c.displayName, c.description], query))
+              .map((c) => ({
+                teamId: team.id,
+                teamName: team.displayName ?? team.id,
+                channelId: c.id,
+                channelName: c.displayName ?? c.id,
+                description: c.description ?? null,
+                membershipType: c.membershipType ?? null,
+                webUrl: c.webUrl ?? null,
+              })),
+          );
+          return { success: true, count: channels.length, channels };
+        } catch (err) {
+          return channelErrResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'list-channel-messages',
+      description:
+        "Read recent root posts from a Teams channel, optionally including replies and/or only the signed-in user's messages. Team and channel may be ids or unambiguous name fragments. Useful when the exact search terms are unknown.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          team: { type: 'string', description: 'Team id or unambiguous team-name substring.' },
+          channel: { type: 'string', description: 'Channel id or unambiguous channel-name substring.' },
+          top: { type: 'number', description: 'Number of root posts to fetch (default 25, max 50).' },
+          includeReplies: { type: 'boolean', description: 'Include replies nested under those root posts (default false).' },
+          fromMe: { type: 'boolean', description: 'Only return messages authored by the signed-in user.' },
+          concise: { type: 'boolean', description: 'Compact output by default. Set false to include exact HTML body content, segments, mentions, and attachments.' },
+        },
+        required: ['team', 'channel'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { team: teamRef, channel: channelRef, top, includeReplies, fromMe } = input as {
+            team: string; channel: string; top?: number; includeReplies?: boolean; fromMe?: boolean;
+          };
+          const { team, channel } = await resolveChannel(client, channelRef, teamRef);
+          const { messages: roots } = await client.listChannelMessages(
+            team.id,
+            channel.id,
+            clampTop(top, 25, 50),
+            !!includeReplies,
+          );
+          const myId = tokenCache.getObjectId();
+          const messages: ReturnType<typeof channelMessageOutput>[] = [];
+          for (const root of roots) {
+            const rootRef = { teamId: team.id, channelId: channel.id, parentMessageId: root.id };
+            const normalizedRoot = normalizeMessage(root, myId);
+            if (!fromMe || normalizedRoot.fromMe) messages.push(channelMessageOutput(root, rootRef, myId, wantConcise(input)));
+            if (includeReplies) {
+              for (const reply of root.replies ?? []) {
+                if (!fromMe || normalizeMessage(reply, myId).fromMe) {
+                  messages.push(channelMessageOutput(reply, rootRef, myId, wantConcise(input)));
+                }
+              }
+            }
+          }
+          return {
+            success: true,
+            team: { id: team.id, name: team.displayName ?? team.id },
+            channel: { id: channel.id, name: channel.displayName ?? channel.id },
+            rootCount: roots.length,
+            count: messages.length,
+            messages,
+          };
+        } catch (err) {
+          return channelErrResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'get-channel-message',
+      description:
+        'Read an exact Teams channel post or reply from a pasted /l/message link or explicit ids. Root-post links include the complete reply thread by default. Exact HTML is returned by default so formatting can be inspected and repaired.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...CHANNEL_MESSAGE_REF_SCHEMA,
+          includeReplies: { type: 'boolean', description: 'For a root post, include every reply (default true).' },
+          concise: { type: 'boolean', description: 'Set true for compact plain-text output. Default false preserves exact HTML.' },
+        },
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const opts = input as Parameters<typeof resolveChannelMessageRef>[0] & { includeReplies?: boolean; concise?: boolean };
+          const ref = resolveChannelMessageRef(opts);
+          const message = await client.getChannelMessage(ref.teamId, ref.channelId, ref.messageId, ref.parentMessageId);
+          const myId = tokenCache.getObjectId();
+          const concise = opts.concise === true;
+          const isRoot = ref.parentMessageId === ref.messageId;
+          const replies = isRoot && opts.includeReplies !== false
+            ? await client.getChannelReplies(ref.teamId, ref.channelId, ref.messageId)
+            : [];
+          return {
+            success: true,
+            reference: ref,
+            message: channelMessageOutput(message, ref, myId, concise),
+            replies: replies.map((r) => channelMessageOutput(r, ref, myId, concise)),
+          };
+        } catch (err) {
+          return channelErrResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'search-channel-messages',
+      description:
+        "Full-text search across Teams channel posts and replies visible to the signed-in user. Optionally scope by team/channel name or id and to the user's own messages. Results contain all ids needed by get-channel-message and edit-channel-message.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search text or a Microsoft Search KQL query.' },
+          team: { type: 'string', description: 'Optional team id or unambiguous team-name substring.' },
+          channel: { type: 'string', description: 'Optional channel id or unambiguous channel-name substring.' },
+          fromMe: { type: 'boolean', description: 'Only return messages authored by the signed-in user.' },
+          top: { type: 'number', description: 'Maximum matching results (default 15, max 50).' },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const { query, team: teamRef, channel: channelRef, fromMe, top } = input as {
+            query: string; team?: string; channel?: string; fromMe?: boolean; top?: number;
+          };
+          const max = clampTop(top, 15, 50);
+          let teamId: string | null = null;
+          let channelId: string | null = null;
+          let resolvedNames: { teamName?: string; channelName?: string } = {};
+          if (channelRef) {
+            const resolved = await resolveChannel(client, channelRef, teamRef);
+            teamId = resolved.team.id;
+            channelId = resolved.channel.id;
+            resolvedNames = {
+              teamName: resolved.team.displayName ?? resolved.team.id,
+              channelName: resolved.channel.displayName ?? resolved.channel.id,
+            };
+          } else if (teamRef) {
+            const team = await resolveTeam(client, teamRef);
+            teamId = team.id;
+            resolvedNames.teamName = team.displayName ?? team.id;
+          }
+
+          const myId = tokenCache.getObjectId();
+          const myName = tokenCache.getDisplayName();
+          const results: Array<Record<string, unknown>> = [];
+          for (let offset = 0; offset < 100 && results.length < max; offset += 25) {
+            const page = await client.searchMessages(query, 25, offset);
+            for (const hit of page) {
+              let hitTeamId = hit.teamId;
+              let hitChannelId = hit.channelId;
+              let hitMessageId = hit.messageId;
+              let hitParentId = hit.replyToId;
+              if ((!hitTeamId || !hitChannelId || !hitMessageId) && hit.webUrl) {
+                try {
+                  const parsed = parseTeamsMessageUrl(hit.webUrl);
+                  hitTeamId ||= parsed.teamId;
+                  hitChannelId ||= parsed.channelId;
+                  hitMessageId ||= parsed.messageId;
+                  hitParentId ||= parsed.parentMessageId;
+                } catch { /* a chat search result, not a channel deep link */ }
+              }
+              if (!hitTeamId || !hitChannelId || !hitMessageId) continue;
+              if (teamId && hitTeamId !== teamId) continue;
+              if (channelId && hitChannelId !== channelId) continue;
+              const authoredByMe = !!myId && hit.fromId === myId || (!hit.fromId && !!myName && hit.from === myName);
+              if (fromMe && !authoredByMe) continue;
+              const urlNames = namesFromTeamsUrl(hit.webUrl);
+              results.push({
+                messageId: hitMessageId,
+                parentMessageId: hitParentId || hitMessageId,
+                teamId: hitTeamId,
+                teamName: resolvedNames.teamName ?? urlNames.teamName,
+                channelId: hitChannelId,
+                channelName: resolvedNames.channelName ?? urlNames.channelName,
+                from: hit.from,
+                fromId: hit.fromId,
+                fromMe: authoredByMe || undefined,
+                createdDateTime: hit.createdDateTime,
+                summary: hit.summary.replace(/<\/?c\d+>/gi, ''),
+                webUrl: hit.webUrl,
+              });
+              if (results.length >= max) break;
+            }
+            if (page.length < 25) break;
+          }
+          return { success: true, count: results.length, results };
+        } catch (err) {
+          return channelErrResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'edit-channel-message',
+      description:
+        "Edit one of the signed-in user's own Teams channel posts or replies. Accepts a pasted Teams /l/message link or explicit ids. Markdown and @[Name](aad:<id>) mentions are converted to Teams HTML.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          ...CHANNEL_MESSAGE_REF_SCHEMA,
+          text: { type: 'string', description: 'Replacement message body.' },
+          contentType: { type: 'string', enum: ['text', 'html'], description: 'Force raw text or HTML. Omit to convert Markdown automatically.' },
+        },
+        required: ['text'],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const opts = input as Parameters<typeof resolveChannelMessageRef>[0] & { text: string; contentType?: 'text' | 'html' };
+          const ref = resolveChannelMessageRef(opts);
+          const current = await client.getChannelMessage(ref.teamId, ref.channelId, ref.messageId, ref.parentMessageId);
+          const myId = tokenCache.getObjectId();
+          if (!myId || current.from?.user?.id !== myId) {
+            throw new Error(`Cannot edit channel message ${ref.messageId}: it was not authored by the signed-in user.`);
+          }
+          const p = opts.contentType
+            ? { body: { contentType: opts.contentType, content: opts.text } as { contentType: 'text' | 'html'; content: string } }
+            : buildMessageBody(opts.text);
+          await client.editChannelMessage(ref.teamId, ref.channelId, ref.messageId, ref.parentMessageId, {
+            body: p.body,
+            ...('mentions' in p && p.mentions ? { mentions: p.mentions } : {}),
+            ...('hostedContents' in p && p.hostedContents ? { hostedContents: p.hostedContents } : {}),
+          });
+          return { success: true, ...ref };
+        } catch (err) {
+          return channelErrResult(err);
+        }
+      },
+    },
+
+    {
+      name: 'delete-channel-message',
+      description:
+        "Soft-delete one of the signed-in user's own Teams channel posts or replies. Accepts a pasted Teams /l/message link or explicit ids.",
+      inputSchema: {
+        type: 'object',
+        properties: CHANNEL_MESSAGE_REF_SCHEMA,
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        try {
+          const client = await ensureAuthenticated();
+          const ref = resolveChannelMessageRef(input as Parameters<typeof resolveChannelMessageRef>[0]);
+          const current = await client.getChannelMessage(ref.teamId, ref.channelId, ref.messageId, ref.parentMessageId);
+          const myId = tokenCache.getObjectId();
+          if (!myId || current.from?.user?.id !== myId) {
+            throw new Error(`Cannot delete channel message ${ref.messageId}: it was not authored by the signed-in user.`);
+          }
+          await client.deleteChannelMessage(ref.teamId, ref.channelId, ref.messageId, ref.parentMessageId);
+          return { success: true, ...ref, softDeleted: true };
+        } catch (err) {
+          return channelErrResult(err);
         }
       },
     },
@@ -1564,6 +2067,13 @@ export const ALL_TOOL_NAMES = [
   'react-to-message',
   'edit-message',
   'delete-message',
+  'list-teams',
+  'list-channels',
+  'list-channel-messages',
+  'get-channel-message',
+  'search-channel-messages',
+  'edit-channel-message',
+  'delete-channel-message',
   'forward-message',
   'mark-chat-read',
   'get-presence',

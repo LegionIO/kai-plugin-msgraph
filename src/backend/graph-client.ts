@@ -4,6 +4,8 @@ import type {
   GraphUser,
   GraphChat,
   GraphChatType,
+  GraphTeam,
+  GraphChannel,
   GraphMessage,
   GraphReaction,
   NormalizedChat,
@@ -30,6 +32,20 @@ interface GraphList<T> {
   '@odata.nextLink'?: string;
 }
 
+export interface MessageSearchHit {
+  messageId: string | null;
+  chatId: string | null;
+  teamId: string | null;
+  channelId: string | null;
+  replyToId: string | null;
+  summary: string;
+  body: string | null;
+  from: string | null;
+  fromId: string | null;
+  createdDateTime: string | null;
+  webUrl: string | null;
+}
+
 export class GraphClient {
   constructor(
     private readonly api: PluginAPI,
@@ -45,8 +61,11 @@ export class GraphClient {
     path: string,
     opts: { query?: Record<string, string>; headers?: Record<string, string>; body?: unknown } = {},
     retried = false,
+    tokenClientId?: string,
   ): Promise<T> {
-    const token = await ensureAccessToken(this.api, { allowInteractive: this.allowInteractive });
+    const token = tokenClientId
+      ? await acquireFociAccessToken(this.api, tokenClientId)
+      : await ensureAccessToken(this.api, { allowInteractive: this.allowInteractive });
     let url: string;
     if (/^https?:/i.test(path)) {
       if (!path.startsWith('https://graph.microsoft.com/')) {
@@ -70,14 +89,14 @@ export class GraphClient {
 
     const safePath = path.replace(/\?.*$/, '');
 
-    if (resp.status === 401 && !retried) {
+    if (resp.status === 401 && !retried && !tokenClientId) {
       getLogger().warn(`Graph 401 on ${method} ${safePath}; refreshing and retrying once`);
       try {
         await forceRefresh(this.api);
       } catch (err) {
         throw new TokenExpiredError(`Token refresh failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-      return this.request<T>(method, path, opts, true);
+      return this.request<T>(method, path, opts, true, tokenClientId);
     }
 
     if (resp.status === 204) return undefined as T;
@@ -94,6 +113,25 @@ export class GraphClient {
       );
     }
     return body as T;
+  }
+
+  /**
+   * Channel permissions differ between Microsoft's first-party Office and Teams
+   * public clients. Prefer the established Office token, then transparently try
+   * the Teams FOCI token when Office lacks a channel-specific delegated scope.
+   */
+  private async channelRequest<T>(
+    method: string,
+    path: string,
+    opts: { query?: Record<string, string>; headers?: Record<string, string>; body?: unknown } = {},
+  ): Promise<T> {
+    try {
+      return await this.request<T>(method, path, opts);
+    } catch (err) {
+      if (!(err instanceof GraphApiError) || err.statusCode !== 403) throw err;
+      getLogger().info(`Office Graph token was denied for ${method} ${path.replace(/\?.*$/, '')}; retrying with Teams token`);
+      return this.request<T>(method, path, opts, false, CLIENT_ID_TEAMS);
+    }
   }
 
   /**
@@ -248,6 +286,121 @@ export class GraphClient {
       if (err instanceof GraphApiError && err.statusCode === 404) return null;
       throw err;
     }
+  }
+
+  // ── Teams and channels ──
+
+  /** Teams the signed-in user is a direct member of. */
+  async listJoinedTeams(): Promise<GraphTeam[]> {
+    let path: string | null = `${GRAPH_BASE_URL}/me/joinedTeams?` + new URLSearchParams({
+      $select: 'id,displayName,description,webUrl,isArchived',
+    }).toString();
+    const out: GraphTeam[] = [];
+    while (path) {
+      const page: GraphList<GraphTeam> = await this.channelRequest('GET', path);
+      out.push(...page.value);
+      path = page['@odata.nextLink'] ?? null;
+    }
+    return out;
+  }
+
+  async getTeam(teamId: string): Promise<GraphTeam> {
+    return this.channelRequest<GraphTeam>('GET', `/teams/${encodeURIComponent(teamId)}`, {
+      query: { $select: 'id,displayName,description,webUrl,isArchived' },
+    });
+  }
+
+  /** Channels in a team that are visible to the signed-in user. */
+  async listChannels(teamId: string): Promise<GraphChannel[]> {
+    let path: string | null = `${GRAPH_BASE_URL}/teams/${encodeURIComponent(teamId)}/channels?` +
+      new URLSearchParams({
+        $select: 'id,displayName,description,membershipType,webUrl,tenantId',
+      }).toString();
+    const out: GraphChannel[] = [];
+    while (path) {
+      const page: GraphList<GraphChannel> = await this.channelRequest('GET', path);
+      out.push(...page.value);
+      path = page['@odata.nextLink'] ?? null;
+    }
+    return out;
+  }
+
+  async listChannelMessages(
+    teamId: string,
+    channelId: string,
+    top = DEFAULT_MESSAGE_TOP,
+    includeReplies = false,
+  ): Promise<{ messages: GraphMessage[]; nextLink: string | null }> {
+    const query: Record<string, string> = { $top: String(Math.min(Math.max(top, 1), 50)) };
+    if (includeReplies) query.$expand = 'replies';
+    const r = await this.channelRequest<GraphList<GraphMessage>>(
+      'GET',
+      `/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/messages`,
+      { query },
+    );
+    return { messages: r.value, nextLink: r['@odata.nextLink'] ?? null };
+  }
+
+  async getChannelMessage(
+    teamId: string,
+    channelId: string,
+    messageId: string,
+    parentMessageId?: string | null,
+  ): Promise<GraphMessage> {
+    return this.channelRequest<GraphMessage>('GET', this.channelMessagePath(teamId, channelId, messageId, parentMessageId));
+  }
+
+  async getChannelReplies(teamId: string, channelId: string, parentMessageId: string): Promise<GraphMessage[]> {
+    let path: string | null = `${GRAPH_BASE_URL}/teams/${encodeURIComponent(teamId)}` +
+      `/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(parentMessageId)}/replies?$top=50`;
+    const out: GraphMessage[] = [];
+    while (path) {
+      const page: GraphList<GraphMessage> = await this.channelRequest('GET', path);
+      out.push(...page.value);
+      path = page['@odata.nextLink'] ?? null;
+    }
+    return out;
+  }
+
+  async editChannelMessage(
+    teamId: string,
+    channelId: string,
+    messageId: string,
+    parentMessageId: string | null | undefined,
+    payload: {
+      body: { contentType: 'text' | 'html'; content: string };
+      mentions?: unknown[];
+      hostedContents?: unknown[];
+      attachments?: unknown[];
+    },
+  ): Promise<void> {
+    await this.channelRequest<void>('PATCH', this.channelMessagePath(teamId, channelId, messageId, parentMessageId), {
+      body: payload,
+    });
+  }
+
+  async deleteChannelMessage(
+    teamId: string,
+    channelId: string,
+    messageId: string,
+    parentMessageId?: string | null,
+  ): Promise<void> {
+    await this.channelRequest<void>('POST', `${this.channelMessagePath(teamId, channelId, messageId, parentMessageId)}/softDelete`, {
+      body: {},
+    });
+  }
+
+  private channelMessagePath(
+    teamId: string,
+    channelId: string,
+    messageId: string,
+    parentMessageId?: string | null,
+  ): string {
+    const base = `/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/messages`;
+    if (parentMessageId && parentMessageId !== messageId) {
+      return `${base}/${encodeURIComponent(parentMessageId)}/replies/${encodeURIComponent(messageId)}`;
+    }
+    return `${base}/${encodeURIComponent(messageId)}`;
   }
 
   // ── Chats ──
@@ -472,18 +625,12 @@ export class GraphClient {
   }
 
   /** Search across all chat messages the signed-in user can access. */
-  async searchMessages(query: string, top = 15): Promise<Array<{
-    chatId: string | null;
-    summary: string;
-    from: string | null;
-    createdDateTime: string | null;
-    webUrl: string | null;
-  }>> {
+  async searchMessages(query: string, top = 15, from = 0): Promise<MessageSearchHit[]> {
     const body = {
       requests: [{
         entityTypes: ['chatMessage'],
         query: { queryString: query },
-        from: 0,
+        from,
         size: top,
       }],
     };
@@ -491,11 +638,15 @@ export class GraphClient {
       value: Array<{
         hitsContainers: Array<{
           hits?: Array<{
+            hitId?: string;
             summary?: string;
             resource?: {
+              id?: string;
               chatId?: string;
+              replyToId?: string | null;
+              channelIdentity?: { teamId?: string; channelId?: string };
               createdDateTime?: string;
-              from?: { user?: { displayName?: string } };
+              from?: { user?: { id?: string; displayName?: string } };
               webUrl?: string;
               body?: { content?: string };
             };
@@ -506,9 +657,15 @@ export class GraphClient {
 
     const hits = r.value?.[0]?.hitsContainers?.[0]?.hits ?? [];
     return hits.map((h) => ({
+      messageId: h.resource?.id ?? h.hitId ?? null,
       chatId: h.resource?.chatId ?? null,
+      teamId: h.resource?.channelIdentity?.teamId ?? null,
+      channelId: h.resource?.channelIdentity?.channelId ?? null,
+      replyToId: h.resource?.replyToId ?? null,
       summary: h.summary ?? h.resource?.body?.content ?? '',
+      body: h.resource?.body?.content ?? null,
       from: h.resource?.from?.user?.displayName ?? null,
+      fromId: h.resource?.from?.user?.id ?? null,
       createdDateTime: h.resource?.createdDateTime ?? null,
       webUrl: h.resource?.webUrl ?? null,
     }));

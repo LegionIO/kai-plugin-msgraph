@@ -90,6 +90,23 @@ export interface GraphChat {
   } | null;
 }
 
+export interface GraphTeam {
+  id: string;
+  displayName?: string | null;
+  description?: string | null;
+  webUrl?: string | null;
+  isArchived?: boolean;
+}
+
+export interface GraphChannel {
+  id: string;
+  displayName?: string | null;
+  description?: string | null;
+  membershipType?: 'standard' | 'private' | 'shared' | 'unknownFutureValue';
+  webUrl?: string | null;
+  tenantId?: string | null;
+}
+
 export interface GraphReaction {
   reactionType: string;
   createdDateTime?: string;
@@ -99,6 +116,11 @@ export interface GraphReaction {
 export interface GraphMessage {
   id: string;
   chatId?: string;
+  replyToId?: string | null;
+  webUrl?: string | null;
+  subject?: string | null;
+  summary?: string | null;
+  channelIdentity?: { teamId?: string; channelId?: string } | null;
   createdDateTime?: string;
   lastModifiedDateTime?: string;
   deletedDateTime?: string | null;
@@ -111,6 +133,7 @@ export interface GraphMessage {
   attachments?: Array<{ id?: string; contentType?: string; name?: string; contentUrl?: string; content?: string }>;
   mentions?: unknown[];
   reactions?: GraphReaction[];
+  replies?: GraphMessage[];
   eventDetail?: { '@odata.type'?: string; [k: string]: unknown } | null;
 }
 
@@ -421,6 +444,13 @@ export interface ToolPermissions {
   reactToMessage: boolean;
   editMessage: boolean;
   deleteMessage: boolean;
+  listTeams: boolean;
+  listChannels: boolean;
+  listChannelMessages: boolean;
+  getChannelMessage: boolean;
+  searchChannelMessages: boolean;
+  editChannelMessage: boolean;
+  deleteChannelMessage: boolean;
   forwardMessage: boolean;
   markChatRead: boolean;
   getPresence: boolean;
@@ -452,6 +482,13 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
   reactToMessage: true,
   editMessage: true,
   deleteMessage: true,
+  listTeams: true,
+  listChannels: true,
+  listChannelMessages: true,
+  getChannelMessage: true,
+  searchChannelMessages: true,
+  editChannelMessage: true,
+  deleteChannelMessage: true,
   forwardMessage: true,
   markChatRead: true,
   getPresence: true,
