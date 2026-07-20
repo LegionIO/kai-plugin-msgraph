@@ -9,6 +9,7 @@ import {
   invokeMessageback,
   invokeTask,
   invokeExecute,
+  getFavoriteChatOrders,
   type UpsAvailability,
 } from './ic3-client.js';
 import { getLogger } from './logger-singleton.js';
@@ -288,6 +289,7 @@ function conciseChat(c: ReturnType<typeof normalizeChat>) {
     lastUpdated: c.lastUpdated,
     lastMessagePreview: c.lastMessagePreview,
     unread: c.unread || undefined,
+    favoriteOrder: c.favoriteOrder ?? undefined,
   };
 }
 
@@ -946,6 +948,10 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             description:
               'Case-insensitive substring matched against chat topic and member display names/emails after fetching.',
           },
+          favoritesOnly: {
+            type: 'boolean',
+            description: 'Return only Teams favorite chats, in the same order as the Favorites section.',
+          },
           top: { type: 'number', description: 'Max chats to fetch from Graph before filtering (default 50).' },
           concise: { type: 'boolean', description: 'Compact output (default true): trims each chat to id, type, topic, a short member summary, last update, preview and unread. Set false for full members[] and webUrl.' },
         },
@@ -954,14 +960,40 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       execute: async (input) => {
         try {
           const client = await ensureAuthenticated();
-          const { chatType, filter, top } = (input ?? {}) as {
+          const { chatType, filter, favoritesOnly, top } = (input ?? {}) as {
             chatType?: GraphChatType;
             filter?: string;
+            favoritesOnly?: boolean;
             top?: number;
           };
-          const { chats: raw } = await client.listChats({ chatType, top: clampTop(top, 50, 50) });
+          const [{ chats: firstPage }, favoriteResult] = await Promise.all([
+            client.listChats({ chatType, top: clampTop(top, 50, 50) }),
+            getFavoriteChatOrders(api).then(
+              (orders) => ({ ok: true as const, orders }),
+              (error: unknown) => ({ ok: false as const, error }),
+            ),
+          ]);
+          if (!favoriteResult.ok && favoritesOnly) throw favoriteResult.error;
+          if (!favoriteResult.ok) getLogger().warn(`list-chats favorites lookup failed: ${favoriteResult.error}`);
+          const favoriteOrders = favoriteResult.ok ? favoriteResult.orders : new Map<string, number>();
+          let raw = firstPage;
+          if (favoritesOnly && favoriteOrders.size > 0) {
+            const seen = new Set(raw.map((chat) => chat.id));
+            const missing = [...favoriteOrders.keys()].filter((id) => !seen.has(id));
+            const fetched = await Promise.allSettled(missing.map((id) => client.getChat(id)));
+            raw = [...raw, ...fetched.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])];
+          }
           const myId = tokenCache.getObjectId();
-          let chats = raw.map((c) => normalizeChat(c, myId));
+          let chats = raw.map((c) => ({
+            ...normalizeChat(c, myId),
+            favoriteOrder: favoriteOrders.get(c.id) ?? null,
+          }));
+          if (chatType) chats = chats.filter((chat) => chat.type === chatType);
+          if (favoritesOnly) {
+            chats = chats
+              .filter((chat) => chat.favoriteOrder !== null)
+              .sort((a, b) => (a.favoriteOrder ?? Number.MAX_SAFE_INTEGER) - (b.favoriteOrder ?? Number.MAX_SAFE_INTEGER));
+          }
           if (filter) {
             const f = filter.toLowerCase();
             chats = chats.filter(

@@ -148,6 +148,8 @@ export interface NormalizedChat {
   lastMessageFrom: string | null;
   unread: boolean;
   webUrl: string | null;
+  /** Teams favorite sort position; null when this is not a favorite chat. */
+  favoriteOrder: number | null;
 }
 
 export interface NormalizedReaction {

@@ -202,6 +202,64 @@ export function ic3Token(api: PluginAPI): Promise<string> {
   return acquireFociAccessToken(api, CLIENT_ID_TEAMS, IC3_SCOPE);
 }
 
+/**
+ * Read the chat ordering behind Teams' Favorites section.
+ *
+ * The undocumented IC3 property is currently returned as a JSON-encoded object
+ * (`{"19:…":2}`), although older clients also understand an array-shaped value.
+ * Ignore special conversations such as `48:notes`; Graph chat ids begin `19:`.
+ */
+export async function getFavoriteChatOrders(api: PluginAPI): Promise<Map<string, number>> {
+  const [rgn, ic3] = await Promise.all([ensureRegion(api), ic3Token(api)]);
+  const resp = await api.fetch(
+    `${rgn.chatServiceAfd}/v1/users/ME/properties?name=favorites`,
+    {
+      headers: {
+        Authorization: `Bearer ${ic3}`,
+        behavioroverride: 'redirectAs404',
+        'x-ms-request-priority': '10',
+        'x-ms-migration': 'True',
+        clientinfo: CLIENT_INFO,
+      },
+    },
+  );
+  if (!resp.ok) throw new IC3Error(`favorites ${resp.status}`, resp.status);
+
+  const body = (await resp.json()) as { favorites?: unknown };
+  let value = body.favorites;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value) as unknown; } catch { value = null; }
+  }
+
+  const out = new Map<string, number>();
+  const add = (id: unknown, order: unknown): void => {
+    if (typeof id !== 'string' || !id.startsWith('19:')) return;
+    const n = typeof order === 'number' ? order : Number(order);
+    if (Number.isFinite(n) && n > 0) out.set(id, n);
+  };
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (!item || typeof item !== 'object') continue;
+      const favorite = item as { conversationId?: unknown; order?: unknown };
+      add(favorite.conversationId, favorite.order);
+    }
+  } else if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.favorites)) {
+      for (const item of record.favorites) {
+        if (!item || typeof item !== 'object') continue;
+        const favorite = item as { conversationId?: unknown; order?: unknown };
+        add(favorite.conversationId, favorite.order);
+      }
+    } else {
+      for (const [id, order] of Object.entries(record)) add(id, order);
+    }
+  }
+
+  return out;
+}
+
 function presenceToken(api: PluginAPI): Promise<string> {
   return acquireFociAccessToken(api, CLIENT_ID_TEAMS, PRESENCE_SCOPE);
 }

@@ -104,6 +104,8 @@ export function PanelView({ pluginState, onAction }: Props) {
   const [filter, setFilter] = useState('');
   const [searchMode, setSearchMode] = useState<'people' | 'content'>('people');
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const [favoritesExpanded, setFavoritesExpanded] = useState(true);
+  const [chatsExpanded, setChatsExpanded] = useState(true);
   const [reactionTarget, setReactionTarget] = useState<string | null>(null);
   const [selfMenuOpen, setSelfMenuOpen] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
@@ -161,6 +163,17 @@ export function PanelView({ pluginState, onAction }: Props) {
     if (unreadOnly) list = list.filter((c) => c.unread);
     return list;
   }, [localMatches, remote, filter, unreadOnly]);
+
+  const favoriteChats = useMemo(
+    () => chats
+      .filter((chat) => typeof chat.favoriteOrder === 'number')
+      .sort((a, b) => (a.favoriteOrder ?? Number.MAX_SAFE_INTEGER) - (b.favoriteOrder ?? Number.MAX_SAFE_INTEGER)),
+    [chats],
+  );
+  const regularChats = useMemo(
+    () => chats.filter((chat) => typeof chat.favoriteOrder !== 'number'),
+    [chats],
+  );
 
   // Debounced remote search when the local filter is sparse.
   useEffect(() => {
@@ -466,7 +479,45 @@ export function PanelView({ pluginState, onAction }: Props) {
           {s.loadingChats && chats.length === 0 && (
             <div className="p-3 text-xs text-muted-foreground">Loading…</div>
           )}
-          {chats.map((ch) => (
+          {!filter.trim() ? (
+            <>
+              {favoriteChats.length > 0 && (
+                <ChatSectionHeader
+                  label="Favorites"
+                  count={favoriteChats.length}
+                  expanded={favoritesExpanded}
+                  favorite
+                  onToggle={() => setFavoritesExpanded((value) => !value)}
+                />
+              )}
+              {favoritesExpanded && favoriteChats.map((ch) => (
+                <ChatRow
+                  key={ch.id}
+                  chat={ch}
+                  photos={photos}
+                  presence={presence}
+                  active={ch.id === s.activeChatId}
+                  onClick={() => onAction('select-chat', { chatId: ch.id })}
+                />
+              ))}
+              <ChatSectionHeader
+                label="Chats"
+                count={regularChats.length}
+                expanded={chatsExpanded}
+                onToggle={() => setChatsExpanded((value) => !value)}
+              />
+              {chatsExpanded && regularChats.map((ch) => (
+                <ChatRow
+                  key={ch.id}
+                  chat={ch}
+                  photos={photos}
+                  presence={presence}
+                  active={ch.id === s.activeChatId}
+                  onClick={() => onAction('select-chat', { chatId: ch.id })}
+                />
+              ))}
+            </>
+          ) : chats.map((ch) => (
             <ChatRow
               key={ch.id}
               chat={ch}
@@ -973,6 +1024,45 @@ function ChatRow({
       </div>
       {chat.unread && <span className="w-2 h-2 rounded-full bg-primary shrink-0" />}
     </div>
+  );
+}
+
+function ChatSectionHeader({
+  label,
+  count,
+  expanded,
+  favorite = false,
+  onToggle,
+}: {
+  label: string;
+  count: number;
+  expanded: boolean;
+  favorite?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      onClick={onToggle}
+      className="group flex w-full items-center gap-1.5 px-2 pt-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors"
+    >
+      <svg
+        className={`h-3 w-3 shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`}
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path d="m7 4 6 6-6 6V4Z" />
+      </svg>
+      {favorite && (
+        <svg className="h-3 w-3 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="m10 1.8 2.45 4.96 5.48.8-3.97 3.86.94 5.46L10 14.3l-4.9 2.58.94-5.46-3.97-3.86 5.48-.8L10 1.8Z" />
+        </svg>
+      )}
+      <span>{label}</span>
+      <span className="ml-auto font-normal tabular-nums opacity-70">{count}</span>
+    </button>
   );
 }
 

@@ -1439,6 +1439,7 @@ export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat
       lp?.from?.user?.displayName ?? lp?.from?.application?.displayName ?? null,
     unread,
     webUrl: c.webUrl ?? null,
+    favoriteOrder: null,
   };
 }
 

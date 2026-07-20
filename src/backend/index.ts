@@ -38,6 +38,7 @@ import {
   sendClearTyping,
   clearTypingThrottle,
   getBotProfiles,
+  getFavoriteChatOrders,
   type UpsAvailability,
 } from './ic3-client.js';
 import { TrouterListener, type TrouterEvent } from './trouter.js';
@@ -79,6 +80,7 @@ let messageLoadSeq = 0;
 let remoteSearchSeq = 0;
 let meJobTitle: string | null = null;
 let paginationInFlight = false;
+let favoriteChatOrders = new Map<string, number>();
 const MAX_CHAT_PAGES = 20;
 
 type PeopleResults = Array<{ id: string; displayName: string; email: string | null }>;
@@ -289,6 +291,13 @@ function applyBotNamesToChats(chats: NormalizedChat[]): NormalizedChat[] {
   });
 }
 
+function applyFavoriteOrders(chats: NormalizedChat[]): NormalizedChat[] {
+  return chats.map((chat) => ({
+    ...chat,
+    favoriteOrder: favoriteChatOrders.get(chat.id) ?? null,
+  }));
+}
+
 async function resolveBotNames(api: PluginAPI, botIds: Set<string>): Promise<void> {
   const need = [...botIds].filter((id) => !botNames.has(id));
   if (!need.length) return;
@@ -316,14 +325,35 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
   api.state.set('error', null);
   try {
     const client = await ensureAuthenticated(api, allowInteractive);
-    const { chats: raw, nextLink } = await client.listChats({});
+    const [chatPage, favoriteResult] = await Promise.all([
+      client.listChats({}),
+      getFavoriteChatOrders(api).then(
+        (orders) => ({ ok: true as const, orders }),
+        (error: unknown) => ({ ok: false as const, error }),
+      ),
+    ]);
     if (session !== tokenCache.currentSession()) return;
+    const { chats: raw, nextLink } = chatPage;
+    if (favoriteResult.ok) {
+      favoriteChatOrders = favoriteResult.orders;
+    } else {
+      getLogger().warn(`favorite chats lookup failed: ${favoriteResult.error}`);
+    }
     const myId = tokenCache.getObjectId();
-    const page1 = applyBotNamesToChats(raw.map((c) => normalizeChat(c, myId)));
     const prev = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
+    const knownIds = new Set([...raw.map((c) => c.id), ...prev.map((c) => c.id)]);
+    const missingFavoriteIds = [...favoriteChatOrders.keys()].filter((id) => !knownIds.has(id));
+    const favoriteFetches = await Promise.allSettled(missingFavoriteIds.map((id) => client.getChat(id)));
+    if (session !== tokenCache.currentSession()) return;
+    const favoriteRaw = favoriteFetches.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+    const page1 = applyBotNamesToChats(
+      applyFavoriteOrders([...raw, ...favoriteRaw].map((c) => normalizeChat(c, myId))),
+    );
     // Preserve already-loaded tail so a periodic refresh of page 1 doesn't shrink the list.
     const p1Ids = new Set(page1.map((c) => c.id));
-    const merged = [...page1, ...prev.filter((c) => !p1Ids.has(c.id))];
+    const merged = applyFavoriteOrders([...page1, ...prev.filter((c) => !p1Ids.has(c.id))]);
     api.state.set('chats', merged);
     api.state.set('chatsNextLink', nextLink);
     updateNavBadge(api);
@@ -357,7 +387,9 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
             if (session !== tokenCache.currentSession()) return;
             const cur = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
             const seen = new Set(cur.map((c) => c.id));
-            const add = applyBotNamesToChats(more.map((c) => normalizeChat(c, myId))).filter((c) => !seen.has(c.id));
+            const add = applyBotNamesToChats(
+              applyFavoriteOrders(more.map((c) => normalizeChat(c, myId))),
+            ).filter((c) => !seen.has(c.id));
             if (add.length) {
               api.state.set('chats', [...cur, ...add]);
               const pageBots = new Set<string>();
@@ -678,6 +710,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         clearFociTokens();
         clearIC3State();
         clearTypingThrottle();
+        favoriteChatOrders.clear();
         tokenCache.invalidateSession();
         await acquireTokenInteractive(api, { forceRefresh: true });
         hadValidTokenSinceLogout = true;
@@ -701,6 +734,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         clearFociTokens();
         clearIC3State();
         clearTypingThrottle();
+        favoriteChatOrders.clear();
         tokenCache.clear();
         tokenCache.persist(api);
         photoCache.clear();
@@ -732,7 +766,9 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           const myId = tokenCache.getObjectId();
           const existing = (api.state.get() as Partial<MsgraphPluginState>).chats ?? [];
           const seen = new Set(existing.map((c) => c.id));
-          const more = applyBotNamesToChats(raw.map((c) => normalizeChat(c, myId))).filter((c) => !seen.has(c.id));
+          const more = applyBotNamesToChats(
+            applyFavoriteOrders(raw.map((c) => normalizeChat(c, myId))),
+          ).filter((c) => !seen.has(c.id));
           api.state.set('chats', [...existing, ...more]);
           api.state.set('chatsNextLink', nextLink);
           updateNavBadge(api);
