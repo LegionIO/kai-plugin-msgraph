@@ -718,11 +718,16 @@ export function teamsCodeBlockHtml(code: string, language: string | null): strin
     ? rendered.language
     : 'plaintext';
   const effectiveLanguage = teamsLanguage ?? detectedTeamsLanguage;
+  // Although a browser normally preserves literal newlines inside <pre>, the
+  // Graph/Teams message sanitizer normalizes them as ordinary HTML whitespace.
+  // Teams' message body therefore needs explicit <br> elements between lines.
+  // parseHtmlBody converts these back to \n when a message is opened for editing.
+  const highlightedHtml = rendered.html.replace(/\r?\n/g, '<br>');
   const itemId = nextCodeBlockId();
   return (
     `<p itemtype="http://schema.skype.com/CodeBlockEditor" id="x_${itemId}">&nbsp;</p>` +
     `<pre class="language-${escAttr(effectiveLanguage)} skipProofing" itemid="${itemId}" spellcheck="false">` +
-    `<code>${rendered.html}</code></pre>`
+    `<code>${highlightedHtml}</code></pre>`
   );
 }
 
