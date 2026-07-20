@@ -12,7 +12,7 @@ import { $isLinkNode } from '@lexical/link';
 import { $isListNode, $isListItemNode } from '@lexical/list';
 import { $isMentionNode, $isImageNode, pendingImageFiles } from './nodes.tsx';
 import type { OutgoingMention } from '../../shared/markdown.ts';
-import { safeUrl, safeImageUrl } from '../../shared/markdown.ts';
+import { safeUrl, safeImageUrl, teamsCodeBlockHtml } from '../../shared/markdown.ts';
 import { fileToBase64 } from '../components/NewChatDialog.tsx';
 
 const esc = (s: string) =>
@@ -81,9 +81,8 @@ function inlineHtml(node: LexicalNode, ctx: Ctx): string {
 function blockHtml(node: LexicalNode, ctx: Ctx): string {
   if ($isCodeNode(node)) {
     const lang = node.getLanguage();
-    const cls = lang ? ` class="language-${esc(lang)}"` : '';
     const text = node.getTextContent();
-    return `<codeblock${cls}><code>${esc(text).replace(/\n/g, '<br>')}</code></codeblock>`;
+    return teamsCodeBlockHtml(text, lang ?? null);
   }
   if ($isListNode(node)) {
     const tag = node.getListType() === 'number' ? 'ol' : 'ul';

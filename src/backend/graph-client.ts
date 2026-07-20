@@ -22,6 +22,7 @@ import type {
 import { GraphApiError, TokenExpiredError } from '../shared/types.js';
 import { ensureAccessToken, forceRefresh, acquireFociAccessToken } from './auth.js';
 import { parseHtmlBody } from './html-segments.js';
+import { downgradeTeamsCodeBlocks } from '../shared/markdown.js';
 import * as tokenCache from './token-cache.js';
 import { getLogger } from './logger-singleton.js';
 
@@ -30,6 +31,14 @@ type Fetch = typeof globalThis.fetch;
 interface GraphList<T> {
   value: T[];
   '@odata.nextLink'?: string;
+}
+
+function downgradedCodeBlockPayload<T extends Record<string, unknown>>(payload: T): T | null {
+  const body = payload.body as { contentType?: unknown; content?: unknown } | undefined;
+  if (!body || typeof body.content !== 'string') return null;
+  const content = downgradeTeamsCodeBlocks(body.content);
+  if (content === body.content) return null;
+  return { ...payload, body: { ...body, content } };
 }
 
 export interface MessageSearchHit {
@@ -374,9 +383,17 @@ export class GraphClient {
       attachments?: unknown[];
     },
   ): Promise<void> {
-    await this.channelRequest<void>('PATCH', this.channelMessagePath(teamId, channelId, messageId, parentMessageId), {
-      body: payload,
-    });
+    const path = this.channelMessagePath(teamId, channelId, messageId, parentMessageId);
+    try {
+      await this.channelRequest<void>('PATCH', path, { body: payload });
+    } catch (err) {
+      const downgraded = downgradeTeamsCodeBlocks(payload.body.content);
+      if (!(err instanceof GraphApiError) || err.statusCode !== 400 || downgraded === payload.body.content) throw err;
+      getLogger().warn(`Graph rejected native Teams code-block markup on PATCH ${path}; retrying without syntax metadata`);
+      await this.channelRequest<void>('PATCH', path, {
+        body: { ...payload, body: { ...payload.body, content: downgraded } },
+      });
+    }
   }
 
   async deleteChannelMessage(
@@ -478,9 +495,15 @@ export class GraphClient {
   }
 
   async sendMessageRaw(chatId: string, payload: Record<string, unknown>): Promise<GraphMessage> {
-    return this.request<GraphMessage>('POST', `/chats/${encodeURIComponent(chatId)}/messages`, {
-      body: payload,
-    });
+    const path = `/chats/${encodeURIComponent(chatId)}/messages`;
+    try {
+      return await this.request<GraphMessage>('POST', path, { body: payload });
+    } catch (err) {
+      const downgraded = downgradedCodeBlockPayload(payload);
+      if (!(err instanceof GraphApiError) || err.statusCode !== 400 || !downgraded) throw err;
+      getLogger().warn(`Graph rejected native Teams code-block markup on POST ${path}; retrying without syntax metadata`);
+      return this.request<GraphMessage>('POST', path, { body: downgraded });
+    }
   }
 
   async editMessage(
@@ -493,9 +516,15 @@ export class GraphClient {
       attachments?: unknown[];
     },
   ): Promise<void> {
-    await this.request<void>('PATCH', `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`, {
-      body: payload,
-    });
+    const path = `/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`;
+    try {
+      await this.request<void>('PATCH', path, { body: payload });
+    } catch (err) {
+      const downgraded = downgradedCodeBlockPayload(payload as unknown as Record<string, unknown>);
+      if (!(err instanceof GraphApiError) || err.statusCode !== 400 || !downgraded) throw err;
+      getLogger().warn(`Graph rejected native Teams code-block markup on PATCH ${path}; retrying without syntax metadata`);
+      await this.request<void>('PATCH', path, { body: downgraded });
+    }
   }
 
   async deleteMessage(chatId: string, messageId: string): Promise<void> {

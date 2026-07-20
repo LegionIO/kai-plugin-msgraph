@@ -8,6 +8,8 @@
 //   URL is scheme-gated (http/https/mailto/tel/relative only). Returns null when
 //   the input contains no markdown syntax so callers can send plain text instead.
 
+import { highlight } from './highlight.js';
+
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -616,7 +618,7 @@ export function mdToHtml(src: string): string | null {
     // of the body — matching the original behavior — so we never scan/trim the
     // rest of the line (which was quadratic on "```!```!…").
     let langEnd = p;
-    while (langEnd < src.length && langEnd - p < 32 && /[A-Za-z0-9_+-]/.test(src[langEnd])) langEnd++;
+    while (langEnd < src.length && langEnd - p < 32 && /[A-Za-z0-9_+.#-]/.test(src[langEnd])) langEnd++;
     const lang = src.slice(p, langEnd);
     const bodyStart = src[langEnd] === '\n' ? langEnd + 1 : langEnd;
     // Find a closing backtick run of length >= openLen.
@@ -632,9 +634,8 @@ export function mdToHtml(src: string): string | null {
     }
     if (close === -1) break; // no valid closing fence → leave the rest as text
     flushText(src.slice(last, open));
-    const langAttr = lang ? ` class="language-${escAttr(lang)}"` : '';
-    const body = esc(src.slice(bodyStart, close).replace(/\n$/, '')).replace(/\n/g, '<br>');
-    parts.push(`<codeblock${langAttr}><code>${body}</code></codeblock>`);
+    const body = src.slice(bodyStart, close).replace(/\n$/, '');
+    parts.push(teamsCodeBlockHtml(body, lang || null));
     // Advance past the full closing run.
     let closeLen = 0;
     while (src[close + closeLen] === '`') closeLen++;
@@ -643,6 +644,105 @@ export function mdToHtml(src: string): string | null {
   }
   flushText(src.slice(last));
   return parts.filter(Boolean).join('');
+}
+
+const TEAMS_LANGUAGE_ALIASES: Record<string, string> = {
+  plain: 'plaintext', 'plain text': 'plaintext',
+  js: 'javascript',
+  ts: 'typescript', tsx: 'typescript',
+  py: 'python',
+  yml: 'yaml',
+  svg: 'xml',
+  sh: 'shell', zsh: 'shell',
+  golang: 'go',
+  cs: 'csharp', 'c#': 'csharp',
+  'c++': 'cpp', cc: 'cpp',
+  docker: 'dockerfile',
+  bat: 'dos', batch: 'dos', cmd: 'dos',
+  gql: 'graphql',
+  kt: 'kotlin',
+  kusto: 'kql',
+  tex: 'latex',
+  'objective-c': 'objectivec', objc: 'objectivec',
+  matlab: 'octave',
+  ps1: 'powershell',
+  rb: 'ruby',
+  'vb.net': 'vbnet', vb: 'vbnet',
+  vbs: 'vbscript',
+  md: 'markdown',
+  text: 'plaintext', txt: 'plaintext',
+};
+
+const TEAMS_LANGUAGE_IDS = new Set([
+  'plaintext', 'bash', 'c', 'cpp', 'csharp', 'css', 'dart', 'dockerfile', 'dos', 'go',
+  'graphql', 'html', 'http', 'java', 'javascript', 'json', 'jsp', 'jsx', 'kotlin', 'kql',
+  'latex', 'lisp', 'markdown', 'objectivec', 'octave', 'perl', 'php', 'powershell',
+  'python', 'r', 'ruby', 'rust', 'scala', 'scss', 'shell', 'sql', 'swift', 'typescript',
+  'vbnet', 'vbscript', 'verilog', 'vhdl', 'xml', 'yaml',
+]);
+
+const TEAMS_HIGHLIGHT_GRAMMAR: Record<string, string> = {
+  html: 'xml',
+  jsp: 'xml',
+  jsx: 'javascript',
+  kql: 'sql',
+  octave: 'matlab',
+};
+
+let codeBlockSequence = 0;
+
+function nextCodeBlockId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return `codeBlockEditor-${uuid}`;
+  codeBlockSequence += 1;
+  return `codeBlockEditor-${Date.now().toString(36)}-${codeBlockSequence.toString(36)}`;
+}
+
+/**
+ * Emit the native Teams V2 code-block shape observed from its composer. Teams
+ * stores a hidden CodeBlockEditor marker followed by a linked <pre>, and the
+ * client submits pre-rendered highlight.js spans rather than a Graph-specific
+ * <codeblock> element. This is what permits native languages such as YAML.
+ */
+export function teamsCodeBlockHtml(code: string, language: string | null): string {
+  const requested = language?.trim().toLowerCase() || null;
+  const aliased = requested ? (TEAMS_LANGUAGE_ALIASES[requested] ?? requested) : null;
+  const teamsLanguage = aliased && TEAMS_LANGUAGE_IDS.has(aliased) ? aliased : null;
+  const grammar = teamsLanguage ? (TEAMS_HIGHLIGHT_GRAMMAR[teamsLanguage] ?? teamsLanguage) : null;
+  const rendered = highlight(code, grammar);
+  // Explicit supported fences retain Teams' exact menu identifier even where
+  // highlighting uses a compatible grammar (JSP→XML, KQL→SQL, Octave→MATLAB).
+  // Unknown fences safely use auto-detection instead of emitting a class Teams
+  // doesn't recognize.
+  const detectedTeamsLanguage = rendered.language && TEAMS_LANGUAGE_IDS.has(rendered.language)
+    ? rendered.language
+    : 'plaintext';
+  const effectiveLanguage = teamsLanguage ?? detectedTeamsLanguage;
+  const itemId = nextCodeBlockId();
+  return (
+    `<p itemtype="http://schema.skype.com/CodeBlockEditor" id="x_${itemId}">&nbsp;</p>` +
+    `<pre class="language-${escAttr(effectiveLanguage)} skipProofing" itemid="${itemId}" spellcheck="false">` +
+    `<code>${rendered.html}</code></pre>`
+  );
+}
+
+/**
+ * Guaranteed-safe fallback for Graph tenants that reject the native Teams code
+ * editor metadata. It keeps the block and its line breaks but removes language
+ * and highlight classes, avoiding the all-or-nothing PATCH failure.
+ */
+export function downgradeTeamsCodeBlocks(html: string): string {
+  const withoutMarkers = html.replace(
+    /<p\b[^>]*\bitemtype="http:\/\/schema\.skype\.com\/CodeBlockEditor"[^>]*>(?:\s|&nbsp;)*<\/p>/gi,
+    '',
+  );
+  return withoutMarkers.replace(
+    /<pre\b[^>]*\bitemid="codeBlockEditor-[^"]+"[^>]*>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/gi,
+    (_m, inner: string) => {
+      const plainHighlightedHtml = inner.replace(/<\/?span\b[^>]*>/gi, '').replace(/\r?\n/g, '<br>');
+      return `<codeblock><code>${plainHighlightedHtml}</code></codeblock>`;
+    },
+  );
 }
 
 export interface PendingImage {
