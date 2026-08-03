@@ -27,6 +27,7 @@ export const AUTH_SCOPES = `${GRAPH_SCOPE} offline_access openid profile`;
 // events, none of which Graph exposes. See ic3-client.ts / trouter.ts.
 export const IC3_SCOPE      = 'https://ic3.teams.office.com/.default';
 export const SPACES_SCOPE   = 'https://api.spaces.skype.com/.default';
+export const CSA_SCOPE      = 'https://chatsvcagg.teams.microsoft.com/.default';
 export const PRESENCE_SCOPE = 'https://presence.teams.microsoft.com/.default';
 export const OUTLOOK_SCOPE  = 'https://outlook.office.com/.default';
 export const OUTLOOK_CLOUD_SETTINGS_URL = 'https://outlook.office.com/ows/v1/OutlookCloudSettings/settings/';
@@ -34,6 +35,7 @@ export const OUTLOOK_ROAMING_SIG_URL = 'https://outlook.office.com/ows/beta/Roam
 export const OWA_SERVICE_URL = 'https://outlook.office.com/owa/service.svc';
 export const TEAMS_AUTHSVC_URL       = 'https://teams.microsoft.com/api/authsvc/v1.0/authz';
 export const TEAMS_CHATSVC_FALLBACK  = 'https://teams.microsoft.com/api/chatsvc/amer';
+export const TEAMS_CSA_FALLBACK      = 'https://teams.microsoft.com/api/csa/amer';
 export const TEAMS_UPS_FALLBACK      = 'https://teams.microsoft.com/ups/noam';
 export const TEAMS_MT_FALLBACK       = 'https://teams.microsoft.com/api/mt/part/amer-03';
 export const TEAMS_REGISTRAR_FALLBACK = 'https://teams.microsoft.com/registrar/prod/V2/registrations';

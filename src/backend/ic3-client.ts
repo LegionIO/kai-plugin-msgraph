@@ -22,9 +22,11 @@ import {
   CLIENT_ID_TEAMS,
   IC3_SCOPE,
   SPACES_SCOPE,
+  CSA_SCOPE,
   PRESENCE_SCOPE,
   TEAMS_AUTHSVC_URL,
   TEAMS_CHATSVC_FALLBACK,
+  TEAMS_CSA_FALLBACK,
   TEAMS_UPS_FALLBACK,
   TEAMS_REGISTRAR_FALLBACK,
   TEAMS_MT_FALLBACK,
@@ -36,6 +38,7 @@ import { getLogger } from './logger-singleton.js';
 
 export interface IC3Region {
   chatServiceAfd: string;
+  chatSvcAggAfd: string;
   presenceUPS: string;
   registrarUrl: string;
   middleTier: string;
@@ -78,6 +81,7 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
   }
   const spaces = await acquireFociAccessToken(api, CLIENT_ID_TEAMS, SPACES_SCOPE);
   let chatServiceAfd = TEAMS_CHATSVC_FALLBACK;
+  let chatSvcAggAfd = TEAMS_CSA_FALLBACK;
   let presenceUPS = TEAMS_UPS_FALLBACK;
   let registrarUrl = TEAMS_REGISTRAR_FALLBACK;
   let middleTier = TEAMS_MT_FALLBACK;
@@ -94,6 +98,7 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
         regionGtms?: {
           chatServiceAfd?: string;
           chatService?: string;
+          chatSvcAggAfd?: string;
           presenceUPS?: string;
           calling_registrarUrl?: string;
           middleTier?: string;
@@ -102,6 +107,7 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
       };
       const g = j.regionGtms ?? {};
       chatServiceAfd = trustedUrl(g.chatServiceAfd || g.chatService, TEAMS_CHATSVC_FALLBACK);
+      chatSvcAggAfd = trustedUrl(g.chatSvcAggAfd, TEAMS_CSA_FALLBACK);
       presenceUPS = trustedUrl(g.presenceUPS, TEAMS_UPS_FALLBACK);
       registrarUrl = trustedUrl(g.calling_registrarUrl, TEAMS_REGISTRAR_FALLBACK);
       middleTier = trustedUrl(g.middleTier || g.mtImageService, TEAMS_MT_FALLBACK);
@@ -113,7 +119,7 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
   } catch (err) {
     getLogger().warn(`IC3 authz failed (${err}); using fallback region`);
   }
-  region = { chatServiceAfd, presenceUPS, registrarUrl, middleTier, skypeToken, expiresAt: Date.now() + ttlMs, session };
+  region = { chatServiceAfd, chatSvcAggAfd, presenceUPS, registrarUrl, middleTier, skypeToken, expiresAt: Date.now() + ttlMs, session };
   return region;
 }
 
@@ -202,14 +208,76 @@ export function ic3Token(api: PluginAPI): Promise<string> {
   return acquireFociAccessToken(api, CLIENT_ID_TEAMS, IC3_SCOPE);
 }
 
+function csaToken(api: PluginAPI): Promise<string> {
+  return acquireFociAccessToken(api, CLIENT_ID_TEAMS, CSA_SCOPE);
+}
+
 /**
  * Read the chat ordering behind Teams' Favorites section.
  *
- * The undocumented IC3 property is currently returned as a JSON-encoded object
- * (`{"19:…":2}`), although older clients also understand an array-shaped value.
- * Ignore special conversations such as `48:notes`; Graph chat ids begin `19:`.
+ * Modern Teams keeps favorites in the chat-service-aggregator's conversation
+ * folders (the "Favorites" folder, `sortType: UserDefinedCustomOrder`), not the
+ * legacy IC3 `favorites` user property. The two stores have diverged in migrated
+ * tenants — the legacy property goes stale — so we read the folder first and only
+ * fall back to the property if the CSA call fails (outage or pre-migration tenant).
+ *
+ * The folder lists `conversationFolderItems` with no explicit order field; order
+ * is the array position. Graph chat ids begin `19:`; ignore anything else.
  */
 export async function getFavoriteChatOrders(api: PluginAPI): Promise<Map<string, number>> {
+  try {
+    return await getFavoriteChatOrdersFromFolders(api);
+  } catch (err) {
+    getLogger().warn(`CSA favorites folder failed (${err}); falling back to legacy property`);
+    return getFavoriteChatOrdersFromProperty(api);
+  }
+}
+
+interface CSAConversationFolder {
+  folderType?: string;
+  name?: string;
+  conversationFolderItems?: Array<{ conversationId?: unknown }>;
+}
+
+async function getFavoriteChatOrdersFromFolders(api: PluginAPI): Promise<Map<string, number>> {
+  const [rgn, csa] = await Promise.all([ensureRegion(api), csaToken(api)]);
+  const resp = await api.fetch(
+    `${rgn.chatSvcAggAfd}/api/v1/teams/users/me/conversationFolders`,
+    {
+      headers: {
+        Authorization: `Bearer ${csa}`,
+        clientinfo: CLIENT_INFO,
+      },
+    },
+  );
+  if (!resp.ok) throw new IC3Error(`conversationFolders ${resp.status}`, resp.status);
+
+  const body = (await resp.json()) as { conversationFolders?: CSAConversationFolder[] };
+  const folders = body.conversationFolders ?? [];
+  const favorites =
+    folders.find((f) => f.folderType === 'Favorites') ??
+    folders.find((f) => f.name === 'Favorites');
+
+  const out = new Map<string, number>();
+  if (!favorites) return out;
+
+  let order = 1;
+  for (const item of favorites.conversationFolderItems ?? []) {
+    const id = item?.conversationId;
+    if (typeof id === 'string' && id.startsWith('19:') && !out.has(id)) {
+      out.set(id, order);
+      order += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Legacy fallback: the undocumented IC3 `favorites` user property, returned as a
+ * JSON-encoded object (`{"19:…":2}`), though older clients also understand an
+ * array-shaped value. Ignore special conversations such as `48:notes`.
+ */
+async function getFavoriteChatOrdersFromProperty(api: PluginAPI): Promise<Map<string, number>> {
   const [rgn, ic3] = await Promise.all([ensureRegion(api), ic3Token(api)]);
   const resp = await api.fetch(
     `${rgn.chatServiceAfd}/v1/users/ME/properties?name=favorites`,
