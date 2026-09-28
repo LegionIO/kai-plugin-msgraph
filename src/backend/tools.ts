@@ -13,6 +13,7 @@ import {
   type UpsAvailability,
 } from './ic3-client.js';
 import { getLogger } from './logger-singleton.js';
+import { resolveTrackedSystemEvents, type TrackedSystemEvents } from '../shared/system-events.js';
 import * as hostedContentCache from './hosted-content-cache.js';
 import { readFile } from 'fs/promises';
 import { homedir } from 'os';
@@ -984,8 +985,12 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             raw = [...raw, ...fetched.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])];
           }
           const myId = tokenCache.getObjectId();
+          const tracked = resolveTrackedSystemEvents(
+            (api.config.getPluginData().preferences as { trackedSystemEvents?: Partial<TrackedSystemEvents> } | undefined)
+              ?.trackedSystemEvents,
+          );
           let chats = raw.map((c) => ({
-            ...normalizeChat(c, myId),
+            ...normalizeChat(c, myId, tracked),
             favoriteOrder: favoriteOrders.get(c.id) ?? null,
           }));
           if (chatType) chats = chats.filter((chat) => chat.type === chatType);

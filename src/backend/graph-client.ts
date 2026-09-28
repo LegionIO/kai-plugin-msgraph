@@ -23,6 +23,7 @@ import { GraphApiError, TokenExpiredError } from '../shared/types.js';
 import { ensureAccessToken, forceRefresh, acquireFociAccessToken } from './auth.js';
 import { parseHtmlBody } from './html-segments.js';
 import { downgradeTeamsCodeBlocks } from '../shared/markdown.js';
+import { DEFAULT_TRACKED_SYSTEM_EVENTS, graphEventCategory, type TrackedSystemEvents } from '../shared/system-events.js';
 import * as tokenCache from './token-cache.js';
 import { getLogger } from './logger-singleton.js';
 
@@ -1397,7 +1398,11 @@ function stripHtml(html: string): string {
     .trim();
 }
 
-export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat {
+export function normalizeChat(
+  c: GraphChat,
+  myId: string | null,
+  tracked: TrackedSystemEvents = DEFAULT_TRACKED_SYSTEM_EVENTS,
+): NormalizedChat {
   const members: NormalizedChat['members'] = (c.members ?? [])
     .filter((m) => m.userId && m.userId !== myId)
     .map((m) => ({
@@ -1419,7 +1424,10 @@ export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat
   const lastMsgAt = lp?.createdDateTime ?? null;
   const readAt = c.viewpoint?.lastMessageReadDateTime ?? null;
   const lastFromMe = lp?.from?.user?.id === myId;
-  const unread = !!lastMsgAt && !lastFromMe && (!readAt || Date.parse(readAt) < Date.parse(lastMsgAt));
+  const rawUnread = !!lastMsgAt && !lastFromMe && (!readAt || Date.parse(readAt) < Date.parse(lastMsgAt));
+  const lastSystemEvent = lp?.eventDetail
+    ? graphEventCategory(lp.eventDetail['@odata.type'])
+    : lp?.messageType === 'systemEventMessage' ? 'other' : null;
 
   let preview = stripHtml(rawBody).slice(0, 200);
   if (!preview) {
@@ -1428,7 +1436,7 @@ export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat
     else if (/<img\b/i.test(rawBody)) preview = 'sent an image';
   }
 
-  return {
+  const chat: NormalizedChat = {
     id: c.id,
     type: c.chatType,
     topic: c.topic ?? (c.chatType === 'oneOnOne' ? members[0]?.displayName ?? null : null),
@@ -1437,10 +1445,34 @@ export function normalizeChat(c: GraphChat, myId: string | null): NormalizedChat
     lastMessagePreview: preview || null,
     lastMessageFrom:
       lp?.from?.user?.displayName ?? lp?.from?.application?.displayName ?? null,
-    unread,
+    unread: false,
+    lastSystemEvent,
+    eventUnread: rawUnread && !!lastSystemEvent,
+    unreadRealAt: rawUnread && !lastSystemEvent ? lastMsgAt : null,
+    lastReadAt: readAt,
     webUrl: c.webUrl ?? null,
     favoriteOrder: null,
   };
+  return withUnread(chat, tracked);
+}
+
+/**
+ * Derive `unread`: a real unread message always counts; a trailing system event
+ * counts only when its category is tracked. Pass `prev` (the previously-known
+ * copy of this chat) so an unread real message stays unread when a muted event
+ * lands on top of it — Graph only exposes the latest message preview.
+ */
+export function withUnread(
+  chat: NormalizedChat,
+  tracked: TrackedSystemEvents,
+  prev?: NormalizedChat | null,
+): NormalizedChat {
+  let unreadRealAt = chat.unreadRealAt;
+  if (!unreadRealAt && chat.lastSystemEvent && prev?.unreadRealAt && (!chat.lastReadAt || Date.parse(chat.lastReadAt) < Date.parse(prev.unreadRealAt))) {
+    unreadRealAt = prev.unreadRealAt;
+  }
+  const eventCounts = chat.eventUnread && !!chat.lastSystemEvent && tracked[chat.lastSystemEvent];
+  return { ...chat, unreadRealAt, unread: !!unreadRealAt || eventCounts };
 }
 
 const REACTION_EMOJI: Record<string, string> = {

@@ -24,7 +24,7 @@ import {
   handleMailAction,
   updateMailNavBadge,
 } from './mail-backend.js';
-import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
+import { GraphClient, normalizeChat, normalizeMessage, withUnread } from './graph-client.js';
 import {
   invokeMessageback,
   invokeTask,
@@ -60,6 +60,7 @@ import type {
   PluginAPI,
   MsgraphPluginState,
   NormalizedChat,
+  GraphChat,
   UserPreferences,
   ToolPermissions,
   MfaState,
@@ -67,6 +68,7 @@ import type {
   TaskModuleState,
 } from '../shared/types.js';
 import { DEFAULT_TOOL_PERMISSIONS } from '../shared/types.js';
+import { resolveTrackedSystemEvents, type TrackedSystemEvents } from '../shared/system-events.js';
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -112,7 +114,19 @@ function getPreferences(api: PluginAPI): UserPreferences {
     mailSignatureHtml: prefs.mailSignatureHtml,
     mailSignatureAutoNew: prefs.mailSignatureAutoNew,
     mailSignatureAutoReply: prefs.mailSignatureAutoReply,
+    trackedSystemEvents: resolveTrackedSystemEvents(prefs.trackedSystemEvents),
   };
+}
+
+function getTrackedSystemEvents(api: PluginAPI): TrackedSystemEvents {
+  return resolveTrackedSystemEvents(getPreferences(api).trackedSystemEvents);
+}
+
+/** Normalize raw Graph chats, carrying forward unread state from the previously-known copies. */
+function normalizeChats(api: PluginAPI, raw: GraphChat[], myId: string | null): NormalizedChat[] {
+  const tracked = getTrackedSystemEvents(api);
+  const prev = new Map(((api.state.get() as Partial<MsgraphPluginState>).chats ?? []).map((c) => [c.id, c]));
+  return raw.map((c) => withUnread(normalizeChat(c, myId, tracked), tracked, prev.get(c.id)));
 }
 
 function getToolPermissions(api: PluginAPI): ToolPermissions {
@@ -374,7 +388,7 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
       result.status === 'fulfilled' ? [result.value] : [],
     );
     const page1 = applyBotNamesToChats(
-      applyFavoriteOrders([...raw, ...favoriteRaw].map((c) => normalizeChat(c, myId))),
+      applyFavoriteOrders(normalizeChats(api, [...raw, ...favoriteRaw], myId)),
     );
     // Preserve already-loaded tail so a periodic refresh of page 1 doesn't shrink the list.
     const p1Ids = new Set(page1.map((c) => c.id));
@@ -413,7 +427,7 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
             const cur = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
             const seen = new Set(cur.map((c) => c.id));
             const add = applyBotNamesToChats(
-              applyFavoriteOrders(more.map((c) => normalizeChat(c, myId))),
+              applyFavoriteOrders(normalizeChats(api, more, myId)),
             ).filter((c) => !seen.has(c.id));
             if (add.length) {
               api.state.set('chats', [...cur, ...add]);
@@ -635,7 +649,9 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
     }
     case 'message': {
       clearTyping(api, ev.chatId);
-      if (!ev.own) {
+      // Untracked system events (member removed, meeting ended, …) never notify or mark unread.
+      const muted = !!ev.systemEvent && !getTrackedSystemEvents(api)[ev.systemEvent];
+      if (!ev.own && !muted) {
         busEmit(api, 'message-received', {
           chatId: ev.chatId,
           messageId: ev.messageId,
@@ -648,8 +664,13 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
       if (st.activeChatId === ev.chatId) {
         scheduleMessageMerge(api, ev.chatId, ev.messageId);
       } else if (!ev.own) {
+        const now = new Date().toISOString();
         const chats = (st.chats ?? []).map((c) =>
-          c.id === ev.chatId ? { ...c, unread: true } : c,
+          c.id !== ev.chatId
+            ? c
+            : ev.systemEvent
+              ? { ...c, lastSystemEvent: ev.systemEvent, eventUnread: true, unread: c.unread || !muted }
+              : { ...c, lastSystemEvent: null, eventUnread: false, unreadRealAt: now, unread: true },
         );
         const idx = chats.findIndex((c) => c.id === ev.chatId);
         if (idx > 0) chats.unshift(...chats.splice(idx, 1));
@@ -792,7 +813,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           const existing = (api.state.get() as Partial<MsgraphPluginState>).chats ?? [];
           const seen = new Set(existing.map((c) => c.id));
           const more = applyBotNamesToChats(
-            applyFavoriteOrders(raw.map((c) => normalizeChat(c, myId))),
+            applyFavoriteOrders(normalizeChats(api, raw, myId)),
           ).filter((c) => !seen.has(c.id));
           api.state.set('chats', [...existing, ...more]);
           api.state.set('chatsNextLink', nextLink);
@@ -862,8 +883,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
           if (seq !== remoteSearchSeq) return;
           const seen = new Set<string>();
           const results = applyBotNamesToChats(
-            rawChats
-              .map((c) => normalizeChat(c, myId))
+            normalizeChats(api, rawChats, myId)
               .filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)))
               .sort((a, b) => (b.lastUpdated ?? '').localeCompare(a.lastUpdated ?? '')),
           );
@@ -934,7 +954,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         await loadMessages(api, chatId);
         // Optimistically clear the unread dot, then tell Graph.
         const chats = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []).map((c) =>
-          c.id === chatId ? { ...c, unread: false } : c,
+          c.id === chatId ? { ...c, unread: false, eventUnread: false, unreadRealAt: null } : c,
         );
         api.state.set('chats', chats);
         updateNavBadge(api);
@@ -1502,6 +1522,12 @@ async function handleSettingsAction(api: PluginAPI, action: string, data?: unkno
         api.config.setPluginData('preferences', { ...current, [key]: value });
         if (key === 'mailSignatureHtml' || key === 'mailSignatureAutoNew' || key === 'mailSignatureAutoReply') {
           void loadSignature(api);
+        }
+        if (key === 'trackedSystemEvents') {
+          const tracked = getTrackedSystemEvents(api);
+          const chats = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []).map((c) => withUnread(c, tracked));
+          api.state.set('chats', chats);
+          updateNavBadge(api);
         }
         break;
       }

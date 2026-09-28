@@ -1,3 +1,5 @@
+import type { SystemEventCategory, TrackedSystemEvents } from './system-events.js';
+
 // ── Error Types ──
 export class TokenExpiredError extends Error {
   name = 'TokenExpiredError' as const;
@@ -147,6 +149,14 @@ export interface NormalizedChat {
   lastMessagePreview: string | null;
   lastMessageFrom: string | null;
   unread: boolean;
+  /** Category of the latest message when it is a Teams system event (member removed, call ended, …). */
+  lastSystemEvent: SystemEventCategory | null;
+  /** The latest message is an unread system event (counts toward `unread` only if its category is tracked). */
+  eventUnread: boolean;
+  /** Timestamp of the newest known unread real (non-system) message, or null. */
+  unreadRealAt: string | null;
+  /** viewpoint.lastMessageReadDateTime from Graph. */
+  lastReadAt: string | null;
   webUrl: string | null;
   /** Teams favorite sort position; null when this is not a favorite chat. */
   favoriteOrder: number | null;
@@ -432,6 +442,8 @@ export interface UserPreferences {
   mailSignatureHtml?: string;
   mailSignatureAutoNew?: boolean;
   mailSignatureAutoReply?: boolean;
+  /** Which Teams system events mark a chat unread / fire notifications. Missing keys use defaults (off). */
+  trackedSystemEvents?: Partial<TrackedSystemEvents>;
 }
 
 export interface ToolPermissions {

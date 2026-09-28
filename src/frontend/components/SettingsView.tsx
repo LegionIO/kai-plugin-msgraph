@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import type { PluginComponentProps } from '../hooks.ts';
 import type { MsgraphPluginState, ToolPermissions, UserPreferences } from '../../shared/types.ts';
 import { DEFAULT_TOOL_PERMISSIONS } from '../../shared/types.ts';
+import { SYSTEM_EVENT_LABELS, resolveTrackedSystemEvents, type SystemEventCategory } from '../../shared/system-events.ts';
 
 type Config = {
   preferences?: Partial<UserPreferences>;
@@ -290,6 +291,7 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
   const cfg = pluginConfig ?? {};
   const prefs = cfg.preferences ?? {};
   const perms = { ...DEFAULT_TOOL_PERMISSIONS, ...(cfg.toolPermissions ?? {}) };
+  const trackedEvents = resolveTrackedSystemEvents(prefs.trackedSystemEvents);
 
   const [username, setUsername] = useState(s.credentials?.username ?? '');
   const [password, setPassword] = useState('');
@@ -449,6 +451,31 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
           />
           <span>Debug logging</span>
         </label>
+      </Section>
+
+      <Section title="Teams system events">
+        <p className="text-xs text-muted-foreground">
+          Choose which Teams system messages mark a chat unread and trigger notifications. Unchecked events still
+          appear in the chat — they just stay quiet.
+        </p>
+        <div className="mt-3 flex flex-col gap-2">
+          {(Object.keys(SYSTEM_EVENT_LABELS) as SystemEventCategory[]).map((key) => (
+            <label key={key} className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={trackedEvents[key]}
+                onChange={(e) =>
+                  onAction('set-preference', {
+                    key: 'trackedSystemEvents',
+                    value: { ...trackedEvents, [key]: e.target.checked },
+                  })
+                }
+                className="accent-primary"
+              />
+              <span>{SYSTEM_EVENT_LABELS[key]}</span>
+            </label>
+          ))}
+        </div>
       </Section>
 
       <Section title="Mail signature">

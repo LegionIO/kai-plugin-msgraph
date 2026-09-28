@@ -19,6 +19,7 @@ import type { PluginAPI } from '../shared/types.js';
 import { ensureRegion, ic3Token } from './ic3-client.js';
 import { acquireFociAccessToken } from './auth.js';
 import { getLogger } from './logger-singleton.js';
+import { ic3EventCategory, type SystemEventCategory } from '../shared/system-events.js';
 
 // ── Event shapes emitted to the handler ──
 
@@ -26,7 +27,17 @@ export type TrouterEvent =
   | { kind: 'connected' }
   | { kind: 'disconnected'; willRetry: boolean }
   | { kind: 'error'; message: string }
-  | { kind: 'message'; chatId: string; messageId: string; fromUserId: string | null; fromName: string | null; own: boolean; preview: string | null }
+  | {
+      kind: 'message';
+      chatId: string;
+      messageId: string;
+      fromUserId: string | null;
+      fromName: string | null;
+      own: boolean;
+      preview: string | null;
+      /** Set when this is a Teams system event (member removed, call ended, …) rather than a chat message. */
+      systemEvent: SystemEventCategory | null;
+    }
   | {
       kind: 'messageUpdate';
       chatId: string;
@@ -408,6 +419,7 @@ export class TrouterListener {
         fromName: res.imdisplayname ?? null,
         own,
         preview,
+        systemEvent: ic3EventCategory(mt, res.content),
       });
       return;
     }
