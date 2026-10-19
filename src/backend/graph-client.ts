@@ -19,13 +19,15 @@ import type {
   MailAttachmentMeta,
   OutgoingMail,
 } from '../shared/types.js';
-import { GraphApiError, TokenExpiredError } from '../shared/types.js';
-import { ensureAccessToken, forceRefresh, acquireFociAccessToken } from './auth.js';
+import { GraphApiError } from '../shared/types.js';
+import { ensureAccessToken, acquireFociAccessToken } from './auth.js';
 import { parseHtmlBody } from './html-segments.js';
 import { downgradeTeamsCodeBlocks } from '../shared/markdown.js';
 import { DEFAULT_TRACKED_SYSTEM_EVENTS, graphEventCategory, type TrackedSystemEvents } from '../shared/system-events.js';
 import * as tokenCache from './token-cache.js';
 import { getLogger } from './logger-singleton.js';
+import { graphFetch, executeBatchItem } from './request-transport.js';
+import { withRequestContext, preventsFallback, responseAttempts } from './request-scheduler.js';
 
 type Fetch = typeof globalThis.fetch;
 
@@ -63,7 +65,7 @@ export class GraphClient {
   ) {}
 
   private get fetch(): Fetch {
-    return this.api.fetch;
+    return (input, init) => graphFetch(this.api, input, init);
   }
 
   private async request<T>(
@@ -99,16 +101,6 @@ export class GraphClient {
 
     const safePath = path.replace(/\?.*$/, '');
 
-    if (resp.status === 401 && !retried && !tokenClientId) {
-      getLogger().warn(`Graph 401 on ${method} ${safePath}; refreshing and retrying once`);
-      try {
-        await forceRefresh(this.api);
-      } catch (err) {
-        throw new TokenExpiredError(`Token refresh failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      return this.request<T>(method, path, opts, true, tokenClientId);
-    }
-
     if (resp.status === 204) return undefined as T;
 
     let body: unknown;
@@ -126,28 +118,20 @@ export class GraphClient {
   }
 
   /**
-   * Channel permissions differ between Microsoft's first-party Office and Teams
-   * public clients. Prefer the established Office token, then transparently try
-   * the Teams FOCI token when Office lacks a channel-specific delegated scope.
+   * The transport qualifies channel scopes before choosing a client. A 403 is
+   * authoritative and must not cause blind client cycling.
    */
   private async channelRequest<T>(
     method: string,
     path: string,
     opts: { query?: Record<string, string>; headers?: Record<string, string>; body?: unknown } = {},
   ): Promise<T> {
-    try {
-      return await this.request<T>(method, path, opts);
-    } catch (err) {
-      if (!(err instanceof GraphApiError) || err.statusCode !== 403) throw err;
-      getLogger().info(`Office Graph token was denied for ${method} ${path.replace(/\?.*$/, '')}; retrying with Teams token`);
-      return this.request<T>(method, path, opts, false, CLIENT_ID_TEAMS);
-    }
+    return this.request<T>(method, path, opts);
   }
 
   /**
-   * Token for /users and /me/people. The Office client shares a tenant-wide
-   * aadgraph throttle bucket that 429s in busy tenants; the Teams client has
-   * User.ReadBasic.All + People.Read on a separate bucket.
+   * Preserve the established Teams preference for directory/people lookups.
+   * Throttle headers, not client names, determine whether alternate capacity exists.
    */
   private directoryToken(): Promise<string> {
     return acquireFociAccessToken(this.api, CLIENT_ID_TEAMS);
@@ -570,7 +554,7 @@ export class GraphClient {
     });
   }
 
-  /** Batch presence lookup. Uses the Outlook Mobile FOCI client (only one with Presence.Read.All). */
+  /** Batch presence lookup. Prefers Outlook Mobile; the transport verifies any alternate Presence.Read.All token. */
   async getPresences(userIds: string[]): Promise<Record<string, Presence>> {
     if (userIds.length === 0) return {};
     const token = await acquireFociAccessToken(this.api, CLIENT_ID_OUTLOOK_MOBILE);
@@ -711,7 +695,7 @@ export class GraphClient {
       ...(['inbox', 'drafts', 'sentitems', 'archive', 'deleteditems', 'junkemail'] as const).map((n) =>
         this.request<{ id: string }>('GET', `/me/mailFolders/${n}`, { query: { $select: 'id' } })
           .then((r) => ({ name: n, id: r.id }))
-          .catch(() => null),
+          .catch(error => { if (preventsFallback(error)) throw error; return null; }),
       ),
     ]);
     const raw = [...first.value];
@@ -743,7 +727,7 @@ export class GraphClient {
     let truncated = top.truncated;
     let frontier = out.filter((f) => f.childFolderCount > 0);
     for (let depth = 1; depth <= maxDepth && frontier.length; depth++) {
-      const pages = await mapLimit(frontier, 5, (f) => this.listChildFoldersPaged(f.id, depth));
+      const pages = await mapLimit(frontier, 3, (f) => this.listChildFoldersPaged(f.id, depth));
       const kids = pages.flatMap((p) => p.folders);
       if (pages.some((p) => p.truncated)) truncated = true;
       out.push(...kids);
@@ -805,20 +789,38 @@ export class GraphClient {
   private async batch(
     reqs: Array<{ method: string; url: string; body?: unknown }>,
   ): Promise<Array<{ id: string; status: number; body?: unknown }>> {
-    const out: Array<{ id: string; status: number; body?: unknown }> = [];
-    for (let i = 0; i < reqs.length; i += 20) {
-      const chunk = reqs.slice(i, i + 20).map((r, j) => ({
-        id: String(i + j),
-        method: r.method,
-        url: r.url,
-        ...(r.body !== undefined ? { body: r.body, headers: { 'Content-Type': 'application/json' } } : {}),
-      }));
-      const res = await this.request<{ responses: Array<{ id: string; status: number; body?: unknown }> }>(
-        'POST', '/$batch', { body: { requests: chunk } },
-      );
-      out.push(...res.responses);
-    }
-    return out;
+    return withRequestContext(this.api, async () => {
+      type Item = { id: string; status: number; headers?: Record<string, string>; body?: unknown };
+      const out: Item[] = [];
+      let failureRetry: GraphApiError['retry'];
+      for (let i = 0; i < reqs.length; i += 20) {
+        const chunk = reqs.slice(i, i + 20).map((r, j) => ({ ...r, id: String(i + j),
+          ...(r.body !== undefined ? { headers: { 'Content-Type': 'application/json' } } : {}) }));
+        const accessToken = await ensureAccessToken(this.api, { allowInteractive: this.allowInteractive });
+        const envelope = await this.fetch(`${GRAPH_BASE_URL}/$batch`, { method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: chunk }) });
+        if (!envelope.ok) throw new GraphApiError('Batch request failed', envelope.status);
+        const res = await envelope.json() as { responses: Item[] };
+        const envelopeAttempts = responseAttempts.get(envelope) ?? 1;
+        for (const item of chunk) {
+          const first = res.responses.find(r => r.id === item.id);
+          const asResponse = (r: Item) => new Response(r.status === 204 ? null : JSON.stringify(r.body ?? {}), { status: r.status, headers: r.headers });
+          try {
+            if (!first) throw new GraphApiError('Missing batch result; completion is unknown', 0, undefined, { ambiguous: true });
+            const response = await executeBatchItem(this.api, item.url, item.method, item.body, asResponse(first), envelopeAttempts);
+            out.push({ id: item.id, status: response.status });
+          } catch (error) {
+            if (error instanceof GraphApiError && (error.retry?.retryAt ?? 0) >= (failureRetry?.retryAt ?? 0)) failureRetry = error.retry;
+            out.push({ id: item.id, status: error instanceof GraphApiError ? error.statusCode : 0 });
+          }
+        }
+        if (out.some(r => r.status < 200 || r.status >= 300)) break;
+      }
+      const succeeded = out.filter(r => r.status >= 200 && r.status < 300).length;
+      if (succeeded !== reqs.length) throw new GraphApiError(`Bulk operation partially completed: ${succeeded} succeeded, ${reqs.length - succeeded} not completed.`,
+        out.find(r => r.status < 200 || r.status >= 300)?.status ?? 0, undefined, { ...failureRetry, partialResult: { succeeded, failed: reqs.length - succeeded } });
+      return out;
+    });
   }
 
   async markFolderRead(folderId: string): Promise<number> {
@@ -1083,21 +1085,26 @@ export class GraphClient {
       const end = Math.min(offset + CHUNK, total);
       const chunk = bytes.subarray(offset, end);
       // NOTE: the pre-authorized uploadUrl must NOT carry the Graph auth header.
-      let resp: Awaited<ReturnType<Fetch>> | null = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      let resp: Response;
+      try {
         resp = await this.fetch(uploadUrl, {
-          method: 'PUT',
-          // Content-Length is a forbidden header in the runtime's fetch (it is
-          // derived from the body); setting it throws ERR_INVALID_ARGUMENT.
-          headers: {
-            'Content-Range': `bytes ${offset}-${end - 1}/${total}`,
-          },
+          method: 'PUT', headers: { 'Content-Range': `bytes ${offset}-${end - 1}/${total}` },
           body: new Uint8Array(chunk),
         });
-        if (resp.status === 429 || resp.status >= 500) continue; // transient — retry
-        break;
+      } catch (error) {
+        if (!(error instanceof GraphApiError) || !error.retry?.ambiguous) throw error;
+        // An uncertain chunk can already be committed. Reconcile before another PUT.
+        const status = await this.fetch(uploadUrl);
+        if (!status.ok) throw new GraphApiError('Unable to reconcile upload progress; upload was not repeated', status.status, undefined, { ambiguous: true });
+        const progress = await status.json() as { id?: string; webUrl?: string; name?: string; nextExpectedRanges?: string[] };
+        if (progress.id && progress.webUrl && progress.name) { finalItem = progress as typeof finalItem; break; }
+        const expected = Number(progress.nextExpectedRanges?.[0]?.split('-')[0]);
+        if (!Number.isInteger(expected) || expected < offset || expected > end || expected === offset) {
+          throw new GraphApiError('Upload progress could not confirm the chunk; retry the upload explicitly', 0, undefined, { ambiguous: true });
+        }
+        offset = expected;
+        continue;
       }
-      if (!resp) throw new GraphApiError('upload session: no response', 0);
       if (resp.status === 200 || resp.status === 201) {
         finalItem = await resp.json() as { id: string; webUrl: string; name: string };
       } else if (resp.status !== 202) {

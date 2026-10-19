@@ -2,7 +2,7 @@
   "name": "msgraph",
   "displayName": "Teams & Outlook",
   "version": "0.5.18",
-  "description": "Microsoft Teams chats/channels + Outlook mail via Graph API — read/send/search/edit messages and email with real-time push and AI tooling",
+  "description": "Microsoft Teams chats/channels + Outlook mail via Graph API \u2014 read/send/search/edit messages and email with real-time push and AI tooling",
   "icon": {
     "lucide": "message-square-more"
   },
@@ -47,6 +47,18 @@
             "type": "number",
             "default": 100,
             "description": "Max cached attachment files (Teams images, mail & SharePoint attachments) kept on disk (oldest evicted). Higher retains more history for AI attachment questions; lower saves disk."
+          },
+          "maxThrottleWaitSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 300,
+            "default": 30,
+            "description": "Maximum time to wait for throttling recovery; 0 returns immediately"
+          },
+          "adaptiveFociRouting": {
+            "type": "boolean",
+            "default": true,
+            "description": "Use scope-qualified FOCI clients when application-specific capacity is available"
           }
         }
       },

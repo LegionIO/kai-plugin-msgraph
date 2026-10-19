@@ -1,3 +1,4 @@
+import { coalesceRefresh } from './request-scheduler.js';
 import type { PluginAPI, Presence } from '../shared/types.js';
 import { GraphClient } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
@@ -22,7 +23,7 @@ export function refresh(api: PluginAPI, client: GraphClient, userIds: Iterable<s
   if (ids.length === 0) return;
   const session = tokenCache.currentSession();
 
-  void (async () => {
+  void coalesceRefresh(api, `presence:${ids.slice().sort().join(',')}`, async () => {
     try {
       for (let i = 0; i < ids.length; i += 650) {
         const chunk = ids.slice(i, i + 650);
@@ -38,7 +39,8 @@ export function refresh(api: PluginAPI, client: GraphClient, userIds: Iterable<s
         disabled = true;
       } else {
         getLogger().warn(`Presence refresh failed: ${err}`);
+        throw err;
       }
     }
-  })();
+  }).catch(() => {});
 }

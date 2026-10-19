@@ -5,6 +5,7 @@ import * as cache from '../src/backend/token-cache.ts';
 import { setLogger } from '../src/backend/logger-singleton.ts';
 import { GraphClient } from '../src/backend/graph-client.ts';
 import { AAD_NATIVE_REDIRECT } from '../src/shared/constants.ts';
+import { withRequestContext } from '../src/backend/request-scheduler.ts';
 import type { PluginAPI } from '../src/shared/types.ts';
 
 const jwt = `e30.${Buffer.from(JSON.stringify({ oid: 'user', tid: 'tenant', upn: 'user@example.test', scp: 'Chat.ReadWrite' })).toString('base64url')}.test`;
@@ -108,6 +109,18 @@ test('Graph 401 with an invalid refresh token reauthenticates and retries the re
   const request = new GraphClient(h.api, false).getMe();
   await flush(); assert.equal(h.windows.length, 1);
   h.complete(); assert.equal((await request).id, 'user'); assert.equal(graphCalls, 2);
+});
+
+test('a logical action can continue after same-account silent recovery without losing its retry budget', async () => {
+  seed(); const h = harness();
+  h.respond(async (form, url) => url.includes('graph.microsoft.com') ? Response.json({ id: 'user' }) :
+    form.get('refresh_token') === 'expired-refresh' ? invalidGrant() : tokenResponse());
+  const action = withRequestContext(h.api, async () => {
+    await auth.ensureAccessToken(h.api, { allowInteractive: false });
+    return new GraphClient(h.api, false).getMe();
+  });
+  await flush(); assert.equal(h.windows.length, 1); h.complete();
+  assert.equal((await action).id, 'user');
 });
 
 test('failed automatic sign-in does not prompt on every poll; explicit retry works', async () => {

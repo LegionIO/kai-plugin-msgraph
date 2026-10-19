@@ -427,6 +427,18 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
           />
         </label>
         <label className="flex items-center gap-2 text-xs mt-3">
+          <span>Maximum throttle wait (seconds)</span>
+          <input className="w-20 px-2 py-1 text-xs bg-muted border border-border rounded-lg"
+            type="number" min={0} max={300} step={1} value={prefs.maxThrottleWaitSeconds ?? 30}
+            onChange={(e) => onAction('set-preference', { key: 'maxThrottleWaitSeconds', value: e.target.value === '' ? 30 : Number(e.target.value) })} />
+        </label>
+        <p className="text-xs text-muted-foreground mt-1">0 returns immediately when Microsoft requires a wait.</p>
+        <label className="flex items-center gap-2 text-xs mt-3">
+          <input type="checkbox" checked={prefs.adaptiveFociRouting !== false}
+            onChange={(e) => onAction('set-preference', { key: 'adaptiveFociRouting', value: e.target.checked })} />
+          <span>Adaptive FOCI routing</span>
+        </label>
+        <label className="flex items-center gap-2 text-xs mt-3">
           <span>Cached attachment files (max)</span>
           <input
             className="w-20 px-2 py-1 text-xs bg-muted border border-border rounded-lg text-foreground focus:border-primary transition-colors"

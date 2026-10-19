@@ -1,3 +1,4 @@
+import { withRequestContext, withNewRequestContext, coalesceRefresh, disposeScheduler, throttleWaitSeconds, preventsFallback } from './request-scheduler.js';
 import {
   acquireTokenInteractive,
   ensureAccessToken,
@@ -81,6 +82,7 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null;
 // a dead generation — the host throws "Plugin is no longer active". Every such
 // continuation re-checks this flag and bails. See postDeactivateSkips.
 let deactivated = false;
+let schedulerApi: PluginAPI | null = null;
 // Count of continuations that bailed because the plugin was already torn down.
 // Surfaced in the plugin log so post-deactivation churn is attributable.
 let postDeactivateSkips = 0;
@@ -113,6 +115,8 @@ function getPreferences(api: PluginAPI): UserPreferences {
     notifications: prefs.notifications ?? true,
     pollIntervalSeconds: prefs.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS,
     debugLogging: prefs.debugLogging ?? false,
+    maxThrottleWaitSeconds: throttleWaitSeconds(prefs.maxThrottleWaitSeconds),
+    adaptiveFociRouting: prefs.adaptiveFociRouting !== false,
     imageCacheMaxEntries: prefs.imageCacheMaxEntries ?? DEFAULT_IMAGE_CACHE_MAX_ENTRIES,
     mailSignatureHtml: prefs.mailSignatureHtml,
     mailSignatureAutoNew: prefs.mailSignatureAutoNew,
@@ -294,7 +298,7 @@ function registerEnabledTools(api: PluginAPI): void {
   const enabled = allTools.filter((t) => perms[permMap[t.name]] !== false);
 
   api.tools.unregister(ALL_TOOL_NAMES);
-  if (enabled.length > 0) api.tools.register(enabled);
+  if (enabled.length > 0) api.tools.register(enabled.map(tool => ({ ...tool, execute: (input: unknown, context?: unknown) => withRequestContext(api, () => tool.execute(input, context)) })));
   getLogger().info(
     `Registered ${enabled.length}/${allTools.length} msgraph tools (${enabled.map((t) => t.name).join(', ') || 'none'})`,
   );
@@ -364,7 +368,11 @@ async function resolveBotNames(api: PluginAPI, botIds: Set<string>): Promise<voi
   }
 }
 
-async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void> {
+function loadChats(api: PluginAPI, allowInteractive = false): Promise<void> {
+  return coalesceRefresh(api, 'chats', () => loadChatsOnce(api, allowInteractive));
+}
+
+async function loadChatsOnce(api: PluginAPI, allowInteractive = false): Promise<void> {
   if (deactivated) return;
   if (!tokenCache.hasRefreshToken() && !tokenCache.isTokenValid()) return;
   const session = tokenCache.currentSession();
@@ -423,13 +431,11 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
       !(api.state.get() as Partial<MsgraphPluginState>).chatsFullyLoaded
     ) {
       paginationInFlight = true;
-      void (async () => {
-        try {
-          let link: string | null = nextLink;
-          let pages = 1;
+      let link: string | null = nextLink;
+      let pages = 1;
+      void withNewRequestContext(api, () => coalesceRefresh(api, 'chat-pagination', async () => {
           while (link && pages < MAX_CHAT_PAGES) {
             if (session !== tokenCache.currentSession()) return;
-            await new Promise((r) => setTimeout(r, 60));
             const { chats: more, nextLink: nl } = await client.listChatsPage(link);
             if (session !== tokenCache.currentSession()) return;
             const cur = ((api.state.get() as Partial<MsgraphPluginState>).chats ?? []);
@@ -454,12 +460,9 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
             api.state.set('chatsFullyLoaded', !link);
             updateNavBadge(api);
           }
-        } catch (err) {
-          getLogger().warn(`background chat pagination stopped: ${err}`);
-        } finally {
-          paginationInFlight = false;
-        }
-      })();
+      }), 'background').catch(err => {
+        if (session === tokenCache.currentSession()) getLogger().warn(`background chat pagination stopped: ${err}`);
+      }).finally(() => { paginationInFlight = false; });
     } else if (!nextLink) {
       api.state.set('chatsFullyLoaded', true);
     }
@@ -467,12 +470,17 @@ async function loadChats(api: PluginAPI, allowInteractive = false): Promise<void
     if (session === tokenCache.currentSession()) {
       api.state.set('error', err instanceof Error ? err.message : String(err));
     }
+    if (preventsFallback(err)) throw err;
   } finally {
     if (session === tokenCache.currentSession()) api.state.set('loadingChats', false);
   }
 }
 
-async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
+function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
+  return coalesceRefresh(api, `messages:${chatId}`, () => loadMessagesOnce(api, chatId));
+}
+
+async function loadMessagesOnce(api: PluginAPI, chatId: string): Promise<void> {
   const seq = ++messageLoadSeq;
   const current = (api.state.get() as Partial<MsgraphPluginState>).activeChatId;
   api.state.set('activeChatId', chatId);
@@ -512,6 +520,7 @@ async function loadMessages(api: PluginAPI, chatId: string): Promise<void> {
   } catch (err) {
     if (seq !== messageLoadSeq) return;
     api.state.set('error', err instanceof Error ? err.message : String(err));
+    if (preventsFallback(err)) throw err;
   } finally {
     if (seq === messageLoadSeq) api.state.set('loadingMessages', false);
   }
@@ -576,7 +585,7 @@ async function mergeMessage(api: PluginAPI, chatId: string, messageId: string): 
     if (norm.imageFiles.length) hostedContentCache.ensureImageFiles(api, client, norm.imageFiles.map((f) => f.url));
   } catch (err) {
     getLogger().warn(`mergeMessage(${chatId},${messageId}) failed: ${err}; falling back to full reload`);
-    if (st().activeChatId === chatId) void loadMessages(api, chatId);
+    if (st().activeChatId === chatId) void loadMessages(api, chatId).catch(() => {});
   }
 }
 
@@ -684,7 +693,7 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
         if (idx > 0) chats.unshift(...chats.splice(idx, 1));
         api.state.set('chats', chats);
         updateNavBadge(api);
-        if (idx < 0) void loadChats(api, false);
+        if (idx < 0) void loadChats(api, false).catch(() => {});
       }
       return;
     }
@@ -706,7 +715,7 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
     }
     case 'conversationUpdate':
       // Sidebar preview / lastUpdated changed — cheap to just refresh page-1.
-      void loadChats(api, false);
+      void loadChats(api, false).catch(() => {});
       return;
     case 'presence': {
       const cur = st.presence ?? {};
@@ -731,7 +740,7 @@ function handleTrouterEvent(api: PluginAPI, ev: TrouterEvent): void {
 function startRealtime(api: PluginAPI): void {
   if (trouter) return;
   api.state.set('realtime', 'connecting');
-  trouter = new TrouterListener(api, tokenCache.getObjectId(), (ev) => handleTrouterEvent(api, ev));
+  trouter = new TrouterListener(api, tokenCache.getObjectId(), (ev) => { void withNewRequestContext(api, async () => handleTrouterEvent(api, ev), 'background').catch(() => {}); });
   const seed = Object.keys((api.state.get() as Partial<MsgraphPluginState>).presence ?? {});
   if (seed.length) trouter.subscribePresence(seed);
   trouter.start();
@@ -1072,7 +1081,7 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
         const chat = await client.getOrCreateOneOnOne(userId);
         api.state.set('userCard', null);
         await loadMessages(api, chat.id);
-        void loadChats(api, false);
+        void loadChats(api, false).catch(() => {});
         break;
       }
       case 'search-people': {
@@ -1519,7 +1528,7 @@ async function handleSettingsAction(api: PluginAPI, action: string, data?: unkno
       case 'set-preference': {
         const { key, value } = data as { key: keyof UserPreferences; value: unknown };
         const current = getPreferences(api);
-        api.config.setPluginData('preferences', { ...current, [key]: value });
+        api.config.setPluginData('preferences', { ...current, [key]: key === 'maxThrottleWaitSeconds' ? throttleWaitSeconds(value) : key === 'adaptiveFociRouting' ? value !== false : value });
         if (key === 'mailSignatureHtml' || key === 'mailSignatureAutoNew' || key === 'mailSignatureAutoReply') {
           void loadSignature(api);
         }
@@ -1562,6 +1571,10 @@ async function refreshTick(api: PluginAPI): Promise<void> {
 }
 
 function resumeSession(api: PluginAPI): void {
+  void withNewRequestContext(api, async () => resumeSessionOnce(api), 'background').catch(() => {});
+}
+
+function resumeSessionOnce(api: PluginAPI): void {
   if (isTornDown()) return;
   const session = tokenCache.currentSession();
   const live = () => !deactivated && session === tokenCache.currentSession();
@@ -1569,7 +1582,7 @@ function resumeSession(api: PluginAPI): void {
   publishAuthState(api);
   startRealtime(api);
   startMailPoll(api);
-  void loadChats(api, true);
+  void loadChats(api, true).catch(() => {});
   void loadMailFolders(api).then(() => { if (live()) void loadMailList(api, 'inbox'); });
   void loadSignature(api);
   void refreshMeProfile(api);
@@ -1578,6 +1591,7 @@ function resumeSession(api: PluginAPI): void {
 // ── Lifecycle ──
 
 export async function activate(api: PluginAPI): Promise<void> {
+  schedulerApi = api;
   setLogger(api.log);
   const log = getLogger();
   log.info('msgraph plugin activating');
@@ -1668,7 +1682,7 @@ export async function activate(api: PluginAPI): Promise<void> {
     'mark-folder-read', 'empty-folder', 'create-folder', 'rename-folder', 'delete-folder',
   ]);
   const dispatch = (action: string, data?: unknown) =>
-    MAIL_ACTIONS.has(action) ? handleMailAction(api, action, data) : handlePanelAction(api, action, data);
+    withRequestContext(api, () => MAIL_ACTIONS.has(action) ? handleMailAction(api, action, data) : handlePanelAction(api, action, data));
   api.onAction(`panel:${PANEL_ID}`, dispatch);
   api.onAction(`panel:${MAIL_PANEL_ID}`, dispatch);
   api.onAction('settings:SettingsView', (action, data) => handleSettingsAction(api, action, data));
@@ -1799,7 +1813,7 @@ export async function activate(api: PluginAPI): Promise<void> {
   });
 
   // Proactive refresh_token loop — keeps access token fresh without user interaction.
-  refreshTimer = setInterval(() => void refreshTick(api), 60_000);
+  refreshTimer = setInterval(() => void withNewRequestContext(api, () => refreshTick(api), 'background'), 60_000);
 
   // If we already have a refresh token, warm the access token and load chats.
   if (tokenCache.hasRefreshToken()) {
@@ -1824,15 +1838,16 @@ export async function activate(api: PluginAPI): Promise<void> {
   pollTimer = setInterval(() => {
     if (deactivated) return;
     if (!tokenCache.hasRefreshToken()) return;
-    void loadChats(api);
+    void withNewRequestContext(api, () => loadChats(api), 'background').catch(() => {});
     const st = api.state.get() as Partial<MsgraphPluginState>;
-    if (st.activeChatId && st.realtime !== 'connected') void loadMessages(api, st.activeChatId);
+    if (st.activeChatId && st.realtime !== 'connected') void withNewRequestContext(api, () => loadMessages(api, st.activeChatId!), 'background').catch(() => {});
   }, Math.max(15, prefs.pollIntervalSeconds) * 1000);
 
   log.info('msgraph plugin activated');
 }
 
 export async function deactivate(): Promise<void> {
+  if (schedulerApi) { disposeScheduler(schedulerApi); schedulerApi = null; }
   // Set first: any in-flight async continuation (startup IIFE, refreshTick,
   // poll) re-checks this via isTornDown() before writing to api.state.
   deactivated = true;

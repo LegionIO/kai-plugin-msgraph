@@ -1,3 +1,5 @@
+import { serviceFetch, preventsFallback, coalesceRefresh, withNewRequestContext, currentRequestContext, getScheduler } from './request-scheduler.js';
+import { GraphApiError } from '../shared/types.js';
 import { randomUUID } from 'node:crypto';
 import { GraphClient } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
@@ -311,10 +313,10 @@ function bumpFolderUnread(api: PluginAPI, folderId: string, delta: number): void
 
 export function startMailPoll(api: PluginAPI): void {
   if (deltaTimer) return;
-  void runDelta(api).catch((e) => getLogger().warn(`initial mail delta: ${e}`));
+  void withNewRequestContext(api, () => runDelta(api), 'background').catch((e) => getLogger().warn(`initial mail delta: ${e}`));
   deltaTimer = setInterval(() => {
     if (!tokenCache.hasRefreshToken()) return;
-    void runDelta(api).catch((e) => getLogger().warn(`mail delta: ${e}`));
+    void withNewRequestContext(api, () => runDelta(api), 'background').catch((e) => getLogger().warn(`mail delta: ${e}`));
   }, MAIL_DELTA_POLL_SECONDS * 1000);
 }
 
@@ -332,7 +334,11 @@ export function disposeMail(): void {
   senderIdCache?.dispose();
 }
 
-async function runDelta(api: PluginAPI): Promise<void> {
+function runDelta(api: PluginAPI): Promise<void> {
+  return coalesceRefresh(api, 'mail-delta', () => runDeltaOnce(api));
+}
+
+async function runDeltaOnce(api: PluginAPI): Promise<void> {
   const session = tokenCache.currentSession();
   const client = await ensureAuthenticated(false);
   const initial = deltaLink === null;
@@ -416,7 +422,7 @@ async function owaAction(api: PluginAPI, action: string, body: Record<string, un
     Header: { __type: 'JsonRequestHeaders:#Exchange', RequestServerVersion: 'V2018_01_08' },
     Body: { __type: `${action}Request:#Exchange`, ...body },
   };
-  const resp = await fetch(`${OWA_SERVICE_URL}?action=${action}&app=Mail`, {
+  const resp = await serviceFetch(api, 'outlook-internal', CLIENT_ID_OFFICE, `${OWA_SERVICE_URL}?action=${action}&app=Mail`, {
     method: 'POST',
     headers: {
       ...H,
@@ -463,7 +469,7 @@ export async function loadSignature(api: PluginAPI): Promise<void> {
   }
   try {
     const H = await outlookHeaders(api);
-    const resp = await api.fetch(
+    const resp = await serviceFetch(api, 'outlook-internal', CLIENT_ID_OFFICE,
       `${OUTLOOK_CLOUD_SETTINGS_URL}?settingname=signaturehtml,roaming_signature_list,roaming_new_signature,roaming_reply_signature`,
       { headers: H },
     );
@@ -479,7 +485,7 @@ export async function loadSignature(api: PluginAPI): Promise<void> {
     const usesRoaming = !!get('roaming_signature_list');
 
     if (!html && newName) {
-      const r2 = await api.fetch(
+      const r2 = await serviceFetch(api, 'outlook-internal', CLIENT_ID_OFFICE,
         `${OUTLOOK_ROAMING_SIG_URL}/GetSignature?signatureName=${encodeURIComponent(newName)}&api-version=1.0`,
         { headers: H },
       );
@@ -594,6 +600,7 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
           });
           log.info(`mark-folder-read(${folderId}): OWA bulk`);
         } catch (e) {
+          if (preventsFallback(e)) throw e;
           log.warn(`OWA MarkAllItemsAsRead failed, falling back to Graph batch: ${(e as Error).message}`);
           const client = await ensureAuthenticated(false);
           const n = await client.markFolderRead(folderId);
@@ -627,6 +634,7 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
           });
           log.info(`empty-folder(${folderId}): OWA bulk (${hardDelete ? 'HardDelete' : 'MoveToDeletedItems'})`);
         } catch (e) {
+          if (preventsFallback(e)) throw e;
           log.warn(`OWA EmptyFolder failed, falling back to Graph batch: ${(e as Error).message}`);
           const client = await ensureAuthenticated(false);
           const n = await client.emptyFolder(folderId, hardDelete);
@@ -838,6 +846,14 @@ export async function handleMailAction(api: PluginAPI, action: string, data?: un
         log.warn(`Unknown mail action: ${action}`);
     }
   } catch (err) {
+    if (err instanceof GraphApiError && err.retry?.partialResult) {
+      const retryAt = err.retry.retryAt ?? Date.now();
+      void withNewRequestContext(api, () => coalesceRefresh(api, 'mail-partial-reconcile', async () => {
+        await getScheduler(api).delay(Math.max(0, retryAt - Date.now()), currentRequestContext()!);
+        await loadMailFolders(api);
+        await loadMailList(api, st(api).activeMailFolder ?? 'inbox');
+      }), 'background').catch(() => {});
+    }
     const msg = err instanceof Error ? err.message : String(err);
     log.error(`Mail action '${action}' failed: ${msg}`);
     api.state.set('mailError', msg);

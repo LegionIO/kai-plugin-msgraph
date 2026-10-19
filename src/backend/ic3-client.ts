@@ -1,3 +1,4 @@
+import { serviceFetch, preventsFallback } from './request-scheduler.js';
 /**
  * Teams-internal chat service (IC3) client.
  *
@@ -69,7 +70,7 @@ function trustedUrl(candidate: string | undefined, fallback: string): string {
     if (h === 'teams.microsoft.com' || TRUSTED_SUFFIXES.some((s) => h.endsWith(s))) {
       return candidate;
     }
-  } catch { /* fall through */ }
+  } catch { /* invalid URL */ }
   getLogger().warn(`IC3: rejecting untrusted region URL "${candidate}", using ${fallback}`);
   return fallback;
 }
@@ -88,7 +89,7 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
   let skypeToken: string | null = null;
   let ttlMs = 30 * 60_000;
   try {
-    const resp = await api.fetch(TEAMS_AUTHSVC_URL, {
+    const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS, TEAMS_AUTHSVC_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${spaces}` },
     });
@@ -117,6 +118,7 @@ export async function ensureRegion(api: PluginAPI): Promise<IC3Region> {
       getLogger().warn(`IC3 authz ${resp.status}; using fallback region`);
     }
   } catch (err) {
+    if (preventsFallback(err)) throw err;
     getLogger().warn(`IC3 authz failed (${err}); using fallback region`);
   }
   region = { chatServiceAfd, chatSvcAggAfd, presenceUPS, registrarUrl, middleTier, skypeToken, expiresAt: Date.now() + ttlMs, session };
@@ -139,7 +141,7 @@ export async function getBotProfiles(api: PluginAPI, botIds: string[]): Promise<
   const out = new Map<string, BotProfile>();
   if (botIds.length === 0) return out;
   const [{ middleTier }, tok] = await Promise.all([ensureRegion(api), spacesToken(api)]);
-  const resp = await api.fetch(
+  const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS,
     `${middleTier}/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&includeBots=true`,
     {
       method: 'POST',
@@ -170,7 +172,7 @@ export async function getBotIcon(api: PluginAPI, botId: string): Promise<string 
   // bots; the real app icon is fetchShortProfile.imageUri on asyncgw (AMS),
   // which authenticates with the skype token.
   try {
-    const p = await api.fetch(
+    const p = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS,
       `${middleTier}/beta/users/fetchShortProfile?isMailAddress=false&includeBots=true`,
       {
         method: 'POST',
@@ -186,16 +188,16 @@ export async function getBotIcon(api: PluginAPI, botId: string): Promise<string 
       const j = (await p.json()) as { value?: Array<{ imageUri?: string }> };
       const uri = j.value?.[0]?.imageUri;
       if (uri && skypeToken && trustedUrl(uri, '') === uri) {
-        const ir = await api.fetch(uri, { headers: { Authorization: `skype_token ${skypeToken}` } });
+        const ir = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS, uri, { headers: { Authorization: `skype_token ${skypeToken}` } });
         if (ir.ok) {
           const buf = Buffer.from(await ir.arrayBuffer());
           if (buf.length > 0) return asDataUrl(ir, buf);
         }
       }
     }
-  } catch { /* fall through */ }
+  } catch (error) { if (preventsFallback(error)) throw error; }
   const myId = tokenCache.getObjectId();
-  const resp = await api.fetch(
+  const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS,
     `${middleTier}/beta/users/${myId}/profilepicturev2/${encodeURIComponent(`28:${botId}`)}?size=HR64x64`,
     { headers: { Authorization: `Bearer ${tok}` } },
   );
@@ -228,6 +230,7 @@ export async function getFavoriteChatOrders(api: PluginAPI): Promise<Map<string,
   try {
     return await getFavoriteChatOrdersFromFolders(api);
   } catch (err) {
+    if (preventsFallback(err)) throw err;
     getLogger().warn(`CSA favorites folder failed (${err}); falling back to legacy property`);
     return getFavoriteChatOrdersFromProperty(api);
   }
@@ -241,7 +244,7 @@ interface CSAConversationFolder {
 
 async function getFavoriteChatOrdersFromFolders(api: PluginAPI): Promise<Map<string, number>> {
   const [rgn, csa] = await Promise.all([ensureRegion(api), csaToken(api)]);
-  const resp = await api.fetch(
+  const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS,
     `${rgn.chatSvcAggAfd}/api/v1/teams/users/me/conversationFolders`,
     {
       headers: {
@@ -279,7 +282,7 @@ async function getFavoriteChatOrdersFromFolders(api: PluginAPI): Promise<Map<str
  */
 async function getFavoriteChatOrdersFromProperty(api: PluginAPI): Promise<Map<string, number>> {
   const [rgn, ic3] = await Promise.all([ensureRegion(api), ic3Token(api)]);
-  const resp = await api.fetch(
+  const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS,
     `${rgn.chatServiceAfd}/v1/users/ME/properties?name=favorites`,
     {
       headers: {
@@ -339,7 +342,7 @@ async function upsRequest<T = void>(
   body?: unknown,
 ): Promise<T> {
   const [rgn, tok] = await Promise.all([ensureRegion(api), presenceToken(api)]);
-  const resp = await api.fetch(`${rgn.presenceUPS}${path}`, {
+  const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS, `${rgn.presenceUPS}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${tok}`,
@@ -411,7 +414,7 @@ let lastTypingSent: Record<string, number> = {};
 
 async function postControl(api: PluginAPI, chatId: string, messagetype: string): Promise<void> {
   const [rgn, ic3] = await Promise.all([ensureRegion(api), ic3Token(api)]);
-  const resp = await api.fetch(
+  const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS,
     `${rgn.chatServiceAfd}/v1/users/ME/conversations/${encodeURIComponent(chatId)}/messages`,
     {
       method: 'POST',
@@ -452,7 +455,7 @@ export async function getConsumptionHorizons(
   chatId: string,
 ): Promise<Record<string, string>> {
   const [rgn, ic3] = await Promise.all([ensureRegion(api), ic3Token(api)]);
-  const resp = await api.fetch(
+  const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS,
     `${rgn.chatServiceAfd}/v1/threads/${encodeURIComponent(chatId)}/consumptionhorizons`,
     { headers: { Authorization: `Bearer ${ic3}`, 'x-ms-migration': 'True' } },
   );
@@ -485,7 +488,7 @@ async function post(api: PluginAPI, botId: string, body: unknown): Promise<unkno
     acquireFociAccessToken(api, CLIENT_ID_TEAMS, IC3_SCOPE),
   ]);
   const url = `${rgn.chatServiceAfd}/v1/agents/28:${botId}/invoke`;
-  const resp = await api.fetch(url, {
+  const resp = await serviceFetch(api, 'teams-internal', CLIENT_ID_TEAMS, url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${ic3}`,

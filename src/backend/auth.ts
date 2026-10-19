@@ -28,6 +28,7 @@ import { hasCredentials, getCredentials } from './credential-store.js';
 import { performAutoLogin, isMicrosoftLoginHost } from './auto-login.js';
 import type { AutoLoginHelpers, AutoLoginCallbacks } from './auto-login.js';
 import { getLogger } from './logger-singleton.js';
+import { serviceFetch, preventsFallback, currentRequestContext, getScheduler, withRequestContext, withNewRequestContext } from './request-scheduler.js';
 
 // ── JWT helpers ──
 
@@ -100,7 +101,7 @@ interface TokenResponse {
   error_description?: string;
 }
 
-class TokenEndpointError extends Error {
+export class TokenEndpointError extends Error {
   constructor(public readonly code: string, status: number, description: string) {
     super(`Token endpoint ${status}: ${code} ${description}`.trim());
   }
@@ -112,11 +113,15 @@ function needsReauthentication(error: unknown): boolean {
 }
 
 async function tokenRequest(api: PluginAPI, form: Record<string, string>): Promise<TokenResponse> {
-  const resp = await api.fetch(AAD_TOKEN_URL, {
+  // Interactive recovery creates a new session while its caller still owns the old context.
+  if (currentRequestContext() && currentRequestContext()!.session !== tokenCache.currentSession()) {
+    return withNewRequestContext(api, () => tokenRequest(api, form));
+  }
+  const resp = await serviceFetch(api, 'identity-token', 'identity', AAD_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(form).toString(),
-  });
+  }, false);
   const body = (await resp.json()) as TokenResponse;
   if (!resp.ok || body.error) {
     throw new TokenEndpointError(body.error ?? '', resp.status, body.error_description ?? '');
@@ -124,7 +129,7 @@ async function tokenRequest(api: PluginAPI, form: Record<string, string>): Promi
   return body;
 }
 
-function buildTokenData(tr: TokenResponse, prevRefreshToken?: string | null): GraphTokenData {
+function buildTokenData(tr: TokenResponse, prevRefreshToken?: string | null, clientId = AUTH_CLIENT_ID): GraphTokenData {
   const access = decodeJwtPayload(tr.access_token);
   let oid = String(access.oid ?? '');
   let tid = String(access.tid ?? '');
@@ -142,6 +147,8 @@ function buildTokenData(tr: TokenResponse, prevRefreshToken?: string | null): Gr
   }
 
   return {
+    clientId: String(access.azp ?? access.appid ?? clientId),
+    audience: String(access.aud ?? ''),
     accessToken: tr.access_token,
     refreshToken: tr.refresh_token ?? prevRefreshToken ?? '',
     expiresAt: Date.now() + tr.expires_in * 1000,
@@ -172,6 +179,7 @@ async function redeemGraphToken(api: PluginAPI): Promise<GraphTokenData> {
 
   getLogger().info('acquireTokenSilent: redeeming refresh token via Office client (FOCI)');
   let tr: TokenResponse;
+  let usedClient: string = GRAPH_CLIENT_ID;
   try {
     tr = await tokenRequest(api, {
       client_id: GRAPH_CLIENT_ID,
@@ -181,9 +189,11 @@ async function redeemGraphToken(api: PluginAPI): Promise<GraphTokenData> {
     });
   } catch (err) {
     if (session !== tokenCache.currentSession()) throw new Error('Signed out');
+    if (preventsFallback(err)) throw err;
     // Fallback: if FOCI redemption is refused for any reason, redeem as the
     // original client. Loses Chat.Read* but keeps ChatMessage.Send etc.
     getLogger().warn(`FOCI refresh via Office client failed (${err}); falling back to auth client`);
+    usedClient = AUTH_CLIENT_ID;
     tr = await tokenRequest(api, {
       client_id: AUTH_CLIENT_ID,
       grant_type: 'refresh_token',
@@ -192,7 +202,7 @@ async function redeemGraphToken(api: PluginAPI): Promise<GraphTokenData> {
     });
   }
 
-  const token = buildTokenData(tr, rt);
+  const token = buildTokenData(tr, rt, usedClient);
   if (session !== tokenCache.currentSession()) {
     throw new Error('Session invalidated during refresh');
   }
@@ -424,20 +434,30 @@ async function doInteractive(api: PluginAPI, attempt: SignInAttempt): Promise<Gr
 
 // Background requests may recover an existing rejected session once. A failed
 // or cancelled attempt requires an explicit click; polling must not prompt again.
+async function finishRecovery(promise: Promise<GraphTokenData>): Promise<GraphTokenData> {
+  const token = await promise;
+  const context = currentRequestContext();
+  if (context && context.account === `${token.tenantId}|${token.objectId}`) {
+    context.session = tokenCache.currentSession();
+    context.controller = new AbortController();
+  }
+  return token;
+}
+
 async function recoverAuthentication(api: PluginAPI, error: unknown, session: number): Promise<GraphTokenData> {
   if (session !== tokenCache.currentSession()) {
     // Only join recovery of this session. An old request must not carry on
     // under a different account after an explicit sign-out and sign-in.
-    if (inFlight?.recoveringSession === session) return inFlight.promise;
+    if (inFlight?.recoveringSession === session) return finishRecovery(inFlight.promise);
     throw new Error('Signed out');
   }
   if (!needsReauthentication(error) || !tokenCache.hasRefreshToken()) throw error;
-  if (inFlight) return inFlight.promise;
+  if (inFlight) return finishRecovery(inFlight.promise);
   api.state.set('auth.isAuthenticated', false);
   if (automaticAttemptSession === session) throw new Error('Session expired. Sign in to reconnect.');
   const promise = acquireTokenInteractive(api, { forceRefresh: true });
   inFlight!.recoveringSession = session;
-  return promise;
+  return finishRecovery(promise);
 }
 
 export interface EnsureOptions {
@@ -464,10 +484,32 @@ export async function ensureAccessToken(api: PluginAPI, opts: EnsureOptions = {}
 
 // ── Secondary FOCI tokens (per client+scope, in-memory only) ──
 
-const fociTokens = new Map<string, { accessToken: string; expiresAt: number; session: number }>();
+export interface FociToken {
+  accessToken: string; expiresAt: number; session: number; clientId: string; audience: string;
+  scopes: string[]; objectId: string; tenantId: string; verified: boolean;
+}
+const fociTokens = new Map<string, FociToken>();
+const fociFlights = new Map<string, Promise<FociToken>>();
+const unavailableCandidates = new Set<string>();
+let candidateTail: Promise<void> = Promise.resolve();
+let candidateNextAt = 0;
+
+export function describeToken(accessToken: string, requestedClient: string, scope = GRAPH_SCOPE, expiresAt = 0): FociToken {
+  let claims: Record<string, unknown> = {};
+  try { claims = decodeJwtPayload(accessToken); } catch { /* Opaque token: never route an alternate on guesses. */ }
+  const audience = String(claims.aud ?? '');
+  const resource = scope.replace(/\/\.default$/, '').replace(/\/$/, '');
+  const clientId = String(claims.azp ?? claims.appid ?? requestedClient);
+  const oid = String(claims.oid ?? ''), tid = String(claims.tid ?? '');
+  return { accessToken, expiresAt: typeof claims.exp === 'number' ? Math.min(expiresAt, claims.exp * 1000) : expiresAt, session: tokenCache.currentSession(), clientId, audience,
+    scopes: typeof claims.scp === 'string' ? claims.scp.split(' ').filter(Boolean) : [], objectId: oid, tenantId: tid,
+    verified: !!(claims.azp ?? claims.appid) && (!claims.azp || !claims.appid || claims.azp === claims.appid) && clientId === requestedClient && oid === tokenCache.getObjectId() && tid === tokenCache.getTenantId() &&
+      !!oid && !!tid && (audience.replace(/\/$/, '') === resource || (resource === 'https://graph.microsoft.com' && audience === '00000003-0000-0000-c000-000000000000')) };
+}
 
 export function clearFociTokens(): void {
   fociTokens.clear();
+  fociFlights.clear(); unavailableCandidates.clear(); candidateNextAt = 0; candidateTail = Promise.resolve();
 }
 
 /**
@@ -481,18 +523,48 @@ export async function acquireFociAccessToken(
   scope: string = GRAPH_SCOPE,
   retried = false,
 ): Promise<string> {
+  return (await acquireFociToken(api, clientId, scope, { retried })).accessToken;
+}
+
+export function acquireFociToken(api: PluginAPI, clientId: string, scope = GRAPH_SCOPE,
+  options: { candidate?: boolean; force?: boolean; retried?: boolean } = {}): Promise<FociToken> {
+  const key = `${tokenCache.currentSession()}|${clientId}|${scope}`;
+  if (options.candidate && unavailableCandidates.has(key)) return Promise.reject(new Error('FOCI candidate unavailable for this session'));
+  if (options.force) fociTokens.delete(key);
+  const cached = fociTokens.get(key);
+  if (cached && cached.expiresAt > Date.now() + 60_000) return Promise.resolve(cached);
+  const flightKey = `${key}|${!!options.candidate}`;
+  const flight = fociFlights.get(flightKey);
+  if (flight) return flight;
+  const promise = withRequestContext(api, () => redeemFociToken(api, clientId, scope, key, options)).finally(() => {
+    if (fociFlights.get(flightKey) === promise) fociFlights.delete(flightKey);
+  });
+  fociFlights.set(flightKey, promise);
+  return promise;
+}
+
+async function redeemFociToken(api: PluginAPI, clientId: string, scope: string, key: string,
+  options: { candidate?: boolean; force?: boolean; retried?: boolean }): Promise<FociToken> {
   if (inFlight) await inFlight.promise;
   if (automaticAttemptSession === tokenCache.currentSession()) throw new Error('Session expired. Sign in to reconnect.');
   const session = tokenCache.currentSession();
-  const key = `${clientId}|${scope}`;
-  const cached = fociTokens.get(key);
-  if (cached && cached.session === session && cached.expiresAt > Date.now() + 60_000) {
-    return cached.accessToken;
-  }
   const rt = tokenCache.getRefreshToken();
   if (!rt) throw new Error('Not signed in');
   let tr: TokenResponse;
+  let releaseCandidate: (() => void) | undefined;
+  let previousCandidate: Promise<void> | undefined;
+  let acquiredCandidate = false;
   try {
+    if (options.candidate) {
+      const previous = candidateTail;
+      previousCandidate = previous;
+      candidateTail = new Promise<void>(resolve => { releaseCandidate = resolve; });
+      await getScheduler(api).awaitTurn(previous, currentRequestContext()!);
+      acquiredCandidate = true;
+      if (session !== tokenCache.currentSession()) throw new Error('Signed out');
+      await getScheduler(api).delay(Math.max(0, candidateNextAt - Date.now()), currentRequestContext()!);
+      candidateNextAt = Date.now() + 1000;
+    }
     tr = await tokenRequest(api, {
       client_id: clientId,
       grant_type: 'refresh_token',
@@ -500,17 +572,22 @@ export async function acquireFociAccessToken(
       scope,
     });
   } catch (error) {
-    if (retried) throw error;
+    if (options.candidate) {
+      if (error instanceof TokenEndpointError) unavailableCandidates.add(key);
+      throw error;
+    }
+    if (options.retried) throw error;
     await recoverAuthentication(api, error, session);
-    return acquireFociAccessToken(api, clientId, scope, true);
+    return withNewRequestContext(api, () => acquireFociToken(api, clientId, scope, { retried: true }));
+  } finally {
+    // A cancelled waiter must not release the next waiter ahead of the current owner.
+    if (!acquiredCandidate && previousCandidate) void previousCandidate.then(() => releaseCandidate?.());
+    else releaseCandidate?.();
   }
   if (session !== tokenCache.currentSession()) throw new Error('Signed out');
-  fociTokens.set(key, {
-    accessToken: tr.access_token,
-    expiresAt: Date.now() + tr.expires_in * 1000,
-    session,
-  });
-  return tr.access_token;
+  const token = describeToken(tr.access_token, clientId, scope, Date.now() + tr.expires_in * 1000);
+  fociTokens.set(key, token);
+  return token;
 }
 
 /** Force a refresh regardless of current expiry. Used on 401 retry. */

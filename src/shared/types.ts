@@ -7,13 +7,18 @@ export class TokenExpiredError extends Error {
 
 export class GraphApiError extends Error {
   name = 'GraphApiError' as const;
-  constructor(message: string, public readonly statusCode: number, public readonly body?: unknown) {
+  constructor(message: string, public readonly statusCode: number, public readonly body?: unknown,
+    public readonly retry?: { retryAt?: number; scope?: string; attempts?: number; ambiguous?: boolean;
+      information?: string; resourceUnits?: number; requestId?: string;
+      partialResult?: { succeeded: number; failed: number } }) {
     super(message);
   }
 }
 
 // ── Token / Auth ──
 export interface GraphTokenData {
+  clientId?: string;
+  audience?: string;
   accessToken: string;
   /** Family refresh token (FOCI). Long-lived; used to silently mint new access tokens. */
   refreshToken: string;
@@ -435,6 +440,8 @@ export interface MsgraphPluginState {
 
 // ── Preferences / Config ──
 export interface UserPreferences {
+  maxThrottleWaitSeconds?: number;
+  adaptiveFociRouting?: boolean;
   notifications: boolean;
   pollIntervalSeconds: number;
   debugLogging: boolean;

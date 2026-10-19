@@ -1,3 +1,4 @@
+import { serviceFetch, preventsFallback } from './request-scheduler.js';
 /**
  * Trouter — Teams' real-time push channel.
  *
@@ -278,7 +279,7 @@ export class TrouterListener {
     try {
       const [rgn, ic3] = await Promise.all([ensureRegion(this.api), ic3Token(this.api)]);
       if (!this.live(g)) return;
-      const resp = await this.api.fetch(rgn.registrarUrl, {
+      const resp = await serviceFetch(this.api, 'teams-internal', CLIENT_ID_TEAMS, rgn.registrarUrl, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${ic3}`,
@@ -320,7 +321,7 @@ export class TrouterListener {
         ensureRegion(this.api),
         acquireFociAccessToken(this.api, CLIENT_ID_TEAMS, PRESENCE_SCOPE),
       ]);
-      const resp = await this.api.fetch(`${rgn.presenceUPS}/v1/pubsub/subscriptions/${this.epid}`, {
+      const resp = await serviceFetch(this.api, 'teams-internal', CLIENT_ID_TEAMS, `${rgn.presenceUPS}/v1/pubsub/subscriptions/${this.epid}`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${tok}`,

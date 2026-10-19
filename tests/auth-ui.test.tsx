@@ -15,6 +15,12 @@ function render(Component: any, overrides = {}) {
   } as MsgraphPluginState;
   return renderToStaticMarkup(<Component pluginName="msgraph" pluginState={pluginState} onAction={() => {}} />);
 }
+test('Settings exposes bounded throttle wait and adaptive routing defaults', () => {
+  const html=render(SettingsView);
+  assert.match(html,/Maximum throttle wait \(seconds\)/);
+  assert.match(html,/min="0" max="300" step="1" value="30"/);
+  assert.match(html,/Adaptive FOCI routing/);
+});
 for (const [name, Component] of [['Settings', SettingsView], ['Teams', PanelView], ['Outlook', MailPanelView]] as const) {
   test(`${name} shows sign-in feedback and disables repeated clicks`, () => {
     const html = render(Component);

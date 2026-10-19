@@ -5,6 +5,11 @@ import { getLogger } from './logger-singleton.js';
 let cached: GraphTokenData | null = null;
 /** Bumped on logout; async writers check this before committing. */
 let sessionGen = 0;
+const sessionListeners = new Set<() => void>();
+export function onSessionInvalidated(fn: () => void): () => void {
+  sessionListeners.add(fn);
+  return () => sessionListeners.delete(fn);
+}
 
 export function currentSession(): number {
   return sessionGen;
@@ -12,6 +17,7 @@ export function currentSession(): number {
 
 export function invalidateSession(): void {
   sessionGen++;
+  for (const fn of sessionListeners) fn();
 }
 
 export function get(): GraphTokenData | null {
