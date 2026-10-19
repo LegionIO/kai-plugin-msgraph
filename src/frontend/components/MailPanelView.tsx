@@ -1,3 +1,4 @@
+import { AuthFeedback, SignInButton } from './AuthFeedback.tsx';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { PluginComponentProps } from '../hooks.ts';
 import { usePanelHeight } from '../hooks.ts';
@@ -68,22 +69,15 @@ export function MailPanelView({ pluginState, onAction }: Props) {
         <p className="text-xs text-muted-foreground max-w-xs">
           Uses the same Microsoft sign-in as the Teams panel.
         </p>
-        <button
-          type="button"
-          onClick={() => onAction('login')}
-          className="px-4 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90"
-        >
-          Sign in
-        </button>
-        {s.auth?.autoLoginStatus && (
-          <p className="text-xs text-muted-foreground animate-pulse">{s.auth.autoLoginStatus}</p>
-        )}
+        <SignInButton state={s} onAction={onAction} />
+        <AuthFeedback state={s} onAction={onAction} />
       </div>
     );
   }
 
   return (
     <div ref={panelRef} className="flex flex-col text-foreground" style={panelHeight ? { height: panelHeight } : undefined}>
+      <AuthFeedback state={s} onAction={onAction} />
       {/* Top bar */}
       <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2 shrink-0">
         <div className="flex items-center gap-2">

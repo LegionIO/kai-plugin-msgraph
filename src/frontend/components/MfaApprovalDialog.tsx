@@ -2,11 +2,13 @@ import React from 'react';
 
 type MfaApprovalDialogProps = {
   approvalNumber: string | null;
+  onShow: () => void;
+  onCancel: () => void;
 };
 
-export function MfaApprovalDialog({ approvalNumber }: MfaApprovalDialogProps) {
+export function MfaApprovalDialog({ approvalNumber, onShow, onCancel }: MfaApprovalDialogProps) {
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div role="dialog" aria-modal="true" aria-label="Approve Microsoft sign-in" className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div className="bg-card rounded-xl shadow-2xl w-full max-w-sm p-6 border border-border text-center">
         <div className="mb-4">
           <svg
@@ -35,6 +37,10 @@ export function MfaApprovalDialog({ approvalNumber }: MfaApprovalDialogProps) {
         {approvalNumber ? (
           <p className="text-xs text-muted-foreground">Enter this number in the Authenticator app</p>
         ) : null}
+        <div className="flex justify-center gap-4 mt-4 text-xs">
+          <button type="button" className="text-primary underline" onClick={onShow}>Show sign-in window</button>
+          <button type="button" className="text-muted-foreground underline" onClick={onCancel}>Cancel sign-in</button>
+        </div>
       </div>
     </div>
   );

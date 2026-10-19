@@ -1,3 +1,4 @@
+import { AuthFeedback, SignInButton } from './AuthFeedback.tsx';
 import React, { useState } from 'react';
 import type { PluginComponentProps } from '../hooks.ts';
 import type { MsgraphPluginState, ToolPermissions, UserPreferences } from '../../shared/types.ts';
@@ -320,15 +321,10 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
         ) : (
           <div className="flex items-center justify-between gap-3">
             <span className="text-xs text-muted-foreground">Not signed in</span>
-            <button
-              type="button"
-              onClick={() => onAction('login')}
-              className="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
-            >
-              Sign in
-            </button>
+            <SignInButton state={s} onAction={onAction} />
           </div>
         )}
+        <AuthFeedback state={s} onAction={onAction} />
       </Section>
 
       <Section title="Auto-login credentials">

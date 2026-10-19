@@ -1,10 +1,13 @@
 import {
   acquireTokenInteractive,
-  acquireTokenSilent,
   ensureAccessToken,
   submitMfaCode,
   cancelMfaCode,
   clearFociTokens,
+  configureAuth,
+  isSigningIn,
+  showSignIn,
+  cancelSignIn,
 } from './auth.js';
 import * as tokenCache from './token-cache.js';
 import * as credentialStore from './credential-store.js';
@@ -148,6 +151,8 @@ function initialState(): MsgraphPluginState {
       jobTitle: null,
       minutesRemaining: null,
       autoLoginStatus: null,
+      isSigningIn: false,
+      error: null,
     },
     mfa: { needed: false, type: null, approvalNumber: null },
     credentials: { hasCredentials: false, username: null, encryptionMethod: 'none' },
@@ -198,14 +203,17 @@ function isTornDown(): boolean {
 }
 
 function publishAuthState(api: PluginAPI): void {
+  const current = (api.state.get() as Partial<MsgraphPluginState>).auth;
   api.state.set('auth', {
-    isAuthenticated: tokenCache.isTokenValid() || tokenCache.hasRefreshToken(),
+    isAuthenticated: tokenCache.isTokenValid() && !isSigningIn(),
     email: tokenCache.getEmail(),
     displayName: tokenCache.getDisplayName(),
     objectId: tokenCache.getObjectId(),
     jobTitle: meJobTitle,
     minutesRemaining: tokenCache.minutesRemaining(),
-    autoLoginStatus: null,
+    autoLoginStatus: current?.autoLoginStatus ?? null,
+    isSigningIn: isSigningIn(),
+    error: current?.error ?? null,
   });
 }
 
@@ -747,26 +755,12 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
   try {
     switch (action) {
       case 'login': {
-        api.state.set('error', null);
-        // A forced login may switch accounts. Rotate the session so all
-        // secondary caches (FOCI tokens, IC3 region, trouter) key off the new
-        // identity instead of leaking the previous account's tokens.
-        stopRealtime(api);
-        stopMailPoll();
-        clearFociTokens();
-        clearIC3State();
-        clearTypingThrottle();
-        favoriteChatOrders.clear();
-        tokenCache.invalidateSession();
-        await acquireTokenInteractive(api, { forceRefresh: true });
-        hadValidTokenSinceLogout = true;
-        publishAuthState(api);
-        startRealtime(api);
-        startMailPoll(api);
-        await loadChats(api, true);
-        void loadMailFolders(api).then(() => loadMailList(api, 'inbox'));
-        void loadSignature(api);
-        void refreshMeProfile(api);
+        // Auth owns session rotation and completion; every surface joins it.
+        await acquireTokenInteractive(api, { forceRefresh: true }).catch(() => {});
+        break;
+      }
+      case 'show-sign-in': {
+        showSignIn();
         break;
       }
       case 'logout': {
@@ -1279,6 +1273,9 @@ async function handlePanelAction(api: PluginAPI, action: string, data?: unknown)
       }
       case 'cancel-mfa': {
         cancelMfaCode();
+        api.state.set('auth.isSigningIn', false);
+        api.state.set('auth.autoLoginStatus', null);
+        api.state.set('auth.error', 'Sign-in cancelled. You can sign in again when ready.');
         api.state.set('mfa', { needed: false, type: null, approvalNumber: null } satisfies MfaState);
         break;
       }
@@ -1484,6 +1481,9 @@ async function handleSettingsAction(api: PluginAPI, action: string, data?: unkno
     switch (action) {
       case 'login':
       case 'logout':
+      case 'submit-mfa-code':
+      case 'cancel-mfa':
+      case 'show-sign-in':
         return handlePanelAction(api, action, data);
       case 'save-credentials': {
         const { username, password } = data as { username: string; password: string };
@@ -1542,6 +1542,8 @@ async function handleSettingsAction(api: PluginAPI, action: string, data?: unkno
 // ── Background: proactive refresh + poll ──
 
 async function refreshTick(api: PluginAPI): Promise<void> {
+  if (deactivated || isSigningIn()) return;
+  const session = tokenCache.currentSession();
   const t = tokenCache.get();
   if (!t?.refreshToken || !hadValidTokenSinceLogout) return;
   if (t.expiresAt - Date.now() > TOKEN_REFRESH_BUFFER_MS) {
@@ -1549,13 +1551,28 @@ async function refreshTick(api: PluginAPI): Promise<void> {
     return;
   }
   try {
-    await acquireTokenSilent(api);
-    if (isTornDown()) return;
+    await ensureAccessToken(api, { allowInteractive: false });
+    if (isTornDown() || session !== tokenCache.currentSession()) return;
     publishAuthState(api);
   } catch (err) {
     if (isTornDown()) return;
-    getLogger().warn(`Proactive silent refresh failed: ${err}`);
+    getLogger().warn(`Proactive token recovery failed: ${err}`);
+    publishAuthState(api);
   }
+}
+
+function resumeSession(api: PluginAPI): void {
+  if (isTornDown()) return;
+  const session = tokenCache.currentSession();
+  const live = () => !deactivated && session === tokenCache.currentSession();
+  hadValidTokenSinceLogout = true;
+  publishAuthState(api);
+  startRealtime(api);
+  startMailPoll(api);
+  void loadChats(api, true);
+  void loadMailFolders(api).then(() => { if (live()) void loadMailList(api, 'inbox'); });
+  void loadSignature(api);
+  void refreshMeProfile(api);
 }
 
 // ── Lifecycle ──
@@ -1568,6 +1585,19 @@ export async function activate(api: PluginAPI): Promise<void> {
   // Fresh generation — clear any teardown flag/counter left by a prior one.
   deactivated = false;
   postDeactivateSkips = 0;
+  configureAuth({
+    onStart: () => {
+      stopRealtime(api);
+      stopMailPoll();
+      clearIC3State();
+      clearTypingThrottle();
+      favoriteChatOrders.clear();
+      messageLoadSeq++;
+      remoteSearchSeq++;
+      api.state.set('auth.isAuthenticated', false);
+    },
+    onSuccess: () => resumeSession(api),
+  });
 
   tokenCache.loadPersisted(api);
   hadValidTokenSinceLogout = tokenCache.hasRefreshToken();
@@ -1773,24 +1803,16 @@ export async function activate(api: PluginAPI): Promise<void> {
 
   // If we already have a refresh token, warm the access token and load chats.
   if (tokenCache.hasRefreshToken()) {
+    const session = tokenCache.currentSession();
     void (async () => {
       try {
-        await acquireTokenSilent(api);
-        if (isTornDown()) return;
-        publishAuthState(api);
-        startRealtime(api);
-        startMailPoll(api);
-        await loadChats(api);
-        if (isTornDown()) return;
-        void loadMailFolders(api).then(() => {
-          if (isTornDown()) return;
-          loadMailList(api, 'inbox');
-        });
-        void loadSignature(api);
-        await refreshMeProfile(api);
+        await ensureAccessToken(api, { allowInteractive: false });
+        // Interactive recovery resumes through onSuccess, exactly once.
+        if (isTornDown() || session !== tokenCache.currentSession()) return;
+        resumeSession(api);
       } catch (err) {
-        if (isTornDown()) return;
-        log.warn(`Startup silent refresh failed: ${err}`);
+        if (isTornDown() || session !== tokenCache.currentSession()) return;
+        log.warn(`Startup token recovery failed: ${err}`);
         publishAuthState(api);
       }
     })();
@@ -1814,6 +1836,9 @@ export async function deactivate(): Promise<void> {
   // Set first: any in-flight async continuation (startup IIFE, refreshTick,
   // poll) re-checks this via isTornDown() before writing to api.state.
   deactivated = true;
+  tokenCache.invalidateSession();
+  cancelSignIn();
+  configureAuth({});
   if (pollTimer) clearInterval(pollTimer);
   if (refreshTimer) clearInterval(refreshTimer);
   if (unsubConfig) unsubConfig();

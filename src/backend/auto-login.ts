@@ -50,7 +50,7 @@ interface PageStateResult {
 
 export interface AutoLoginHelpers {
   executeJavaScript: (code: string) => Promise<unknown>;
-  getURL: () => string;
+  getURL: () => string | Promise<string>;
   show: () => void;
 }
 
@@ -82,8 +82,13 @@ export function isMicrosoftLoginHost(url: string): boolean {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => { clearTimeout(timer); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 async function detectPageState(helpers: AutoLoginHelpers): Promise<PageStateResult> {
@@ -106,7 +111,7 @@ async function detectPageState(helpers: AutoLoginHelpers): Promise<PageStateResu
         }
         var tilesHolder = document.querySelector('${SELECTORS.ACCOUNT_PICKER_TILES}');
         var loginHeader = document.querySelector('${SELECTORS.ACCOUNT_PICKER_HEADER}');
-        if (tilesHolder && loginHeader) {
+        if (tilesHolder && tilesHolder.offsetParent !== null && loginHeader) {
           var headerText = loginHeader.textContent || '';
           if (headerText.includes('Pick an account') || headerText.includes('pick an account')) {
             return { state: 'account_picker' };
@@ -114,15 +119,16 @@ async function detectPageState(helpers: AutoLoginHelpers): Promise<PageStateResu
         }
         var mfaProofSection = document.querySelector('${SELECTORS.MFA_PROOF_SECTION}');
         var mfaTitle = document.querySelector('${SELECTORS.MFA_PROOF_TITLE}');
-        if (mfaProofSection && mfaTitle) {
+        if (mfaProofSection && mfaProofSection.offsetParent !== null && mfaTitle) {
           var titleText = mfaTitle.textContent || '';
           if (titleText.includes('Verify your identity') || titleText.includes('verify your identity')) {
             return { state: 'mfa_method_picker' };
           }
         }
         var approvalDesc = document.querySelector('${SELECTORS.MFA_APPROVAL_INDICATOR}');
-        if (approvalDesc && approvalDesc.textContent && approvalDesc.textContent.toLowerCase().includes('approve')) {
-          var signEl = document.querySelector('#idRichContext_DisplaySign');
+        var signEl = document.querySelector('#idRichContext_DisplaySign');
+        if ((signEl && signEl.offsetParent !== null && signEl.textContent.trim()) ||
+            (approvalDesc && approvalDesc.offsetParent !== null && approvalDesc.textContent.trim())) {
           var approvalNumber = signEl ? (signEl.textContent || '').trim() : '';
           return { state: 'mfa_authenticator_push', approvalNumber: approvalNumber || undefined };
         }
@@ -154,13 +160,18 @@ async function waitForState(
   helpers: AutoLoginHelpers,
   expectedStates: LoginPageState[],
   timeoutMs: number,
+  signal?: AbortSignal,
+  onState?: (state: PageStateResult) => void,
 ): Promise<PageStateResult> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     const result = await detectPageState(helpers);
+    signal?.throwIfAborted();
+    onState?.(result);
     if (expectedStates.includes(result.state)) return result;
     if (result.state === 'error') return result;
-    await sleep(AUTO_LOGIN_POLL_INTERVAL_MS);
+    await sleep(AUTO_LOGIN_POLL_INTERVAL_MS, signal);
   }
   throw new Error(`Timed out waiting for states: [${expectedStates.join(', ')}]`);
 }
@@ -273,6 +284,7 @@ async function handleMfa(
   helpers: AutoLoginHelpers,
   startState: PageStateResult,
   callbacks: AutoLoginCallbacks,
+  signal?: AbortSignal,
 ): Promise<{ result: AutoLoginResult | null; currentState: PageStateResult }> {
   let currentState = startState;
 
@@ -285,9 +297,10 @@ async function handleMfa(
     try {
       afterMethodPick = await waitForState(helpers,
         ['mfa_sms_code', 'mfa_totp_code', 'mfa_authenticator_push', 'stay_signed_in', 'not_login_page', 'error'],
-        AUTO_LOGIN_STEP_TIMEOUT_MS,
+        AUTO_LOGIN_STEP_TIMEOUT_MS, signal,
       );
     } catch {
+      signal?.throwIfAborted();
       return { result: fallback(helpers, callbacks, 'Timed out waiting for MFA method to load'), currentState };
     }
     if (afterMethodPick.state === 'error') {
@@ -302,18 +315,22 @@ async function handleMfa(
     try {
       code = await callbacks.onMfaCodeNeeded(mfaType);
     } catch {
+      signal?.throwIfAborted();
       return { result: fallback(helpers, callbacks, 'MFA code entry cancelled'), currentState };
     }
+    signal?.throwIfAborted();
     await fillAndSubmitMfaCode(helpers, code);
     let afterMfa: PageStateResult;
     try {
       afterMfa = await waitForState(helpers,
         ['stay_signed_in', 'not_login_page', 'error'],
-        AUTO_LOGIN_STEP_TIMEOUT_MS * 2,
+        AUTO_LOGIN_STEP_TIMEOUT_MS * 2, signal,
       );
     } catch {
+      signal?.throwIfAborted();
       return { result: fallback(helpers, callbacks, 'Timed out waiting for MFA verification'), currentState };
     }
+    callbacks.onMfaApprovalComplete();
     if (afterMfa.state === 'error') {
       return { result: fallback(helpers, callbacks, `MFA error: ${afterMfa.errorText}`), currentState };
     }
@@ -321,15 +338,22 @@ async function handleMfa(
   }
 
   if (startState.state === 'mfa_authenticator_push' || currentState.state === 'mfa_authenticator_push') {
-    const approvalNumber = startState.approvalNumber || currentState.approvalNumber;
+    let approvalNumber = currentState.approvalNumber || startState.approvalNumber;
     callbacks.onMfaApprovalNeeded(approvalNumber);
     let afterApproval: PageStateResult;
     try {
       afterApproval = await waitForState(helpers,
-        ['stay_signed_in', 'not_login_page', 'error'],
-        AUTO_LOGIN_MFA_TIMEOUT_MS,
+        ['stay_signed_in', 'not_login_page', 'mfa_sms_code', 'mfa_totp_code', 'mfa_method_picker', 'error'],
+        AUTO_LOGIN_MFA_TIMEOUT_MS, signal,
+        (page) => {
+          if (page.state === 'mfa_authenticator_push' && page.approvalNumber && page.approvalNumber !== approvalNumber) {
+            approvalNumber = page.approvalNumber;
+            callbacks.onMfaApprovalNeeded(approvalNumber);
+          }
+        },
       );
     } catch {
+      signal?.throwIfAborted();
       callbacks.onMfaApprovalComplete();
       return { result: fallback(helpers, callbacks, 'MFA push approval timed out'), currentState };
     }
@@ -338,6 +362,9 @@ async function handleMfa(
       return { result: fallback(helpers, callbacks, `MFA approval error: ${afterApproval.errorText}`), currentState };
     }
     currentState = afterApproval;
+    if (['mfa_sms_code', 'mfa_totp_code', 'mfa_method_picker'].includes(currentState.state)) {
+      return handleMfa(helpers, currentState, callbacks, signal);
+    }
   }
 
   return { result: null, currentState };
@@ -347,99 +374,39 @@ export async function performAutoLogin(
   helpers: AutoLoginHelpers,
   credentials: { username: string; password: string },
   callbacks: AutoLoginCallbacks,
+  signal?: AbortSignal,
 ): Promise<AutoLoginResult> {
+  const states: LoginPageState[] = [
+    'username_needed', 'password_needed', 'account_picker', 'mfa_method_picker',
+    'mfa_sms_code', 'mfa_authenticator_push', 'mfa_totp_code', 'stay_signed_in', 'not_login_page',
+  ];
   try {
-    let initialState: PageStateResult;
-    try {
-      initialState = await waitForState(helpers,
-        ['username_needed', 'password_needed', 'account_picker', 'not_login_page'],
-        AUTO_LOGIN_STEP_TIMEOUT_MS,
-      );
-    } catch {
-      return fallback(helpers, callbacks, 'Timed out waiting for login page to load');
-    }
-
-    if (initialState.state === 'not_login_page') {
-      return { success: true, fallbackToManual: false };
-    }
-    if (initialState.state === 'error') {
-      return fallback(helpers, callbacks, `Login page error: ${initialState.errorText}`);
-    }
-
-    if (initialState.state === 'account_picker') {
-      await clickAccountTile(helpers, credentials.username);
-      let afterPick: PageStateResult;
-      try {
-        afterPick = await waitForState(helpers,
-          ['username_needed', 'password_needed', 'mfa_method_picker', 'mfa_sms_code',
-           'mfa_authenticator_push', 'mfa_totp_code', 'stay_signed_in', 'not_login_page', 'error'],
-          AUTO_LOGIN_STEP_TIMEOUT_MS,
-        );
-      } catch {
-        return fallback(helpers, callbacks, 'Timed out after account picker selection');
-      }
-      if (afterPick.state === 'error') {
-        return fallback(helpers, callbacks, `Account picker error: ${afterPick.errorText}`);
-      }
-      initialState = afterPick;
-
-      if (['mfa_method_picker', 'mfa_sms_code', 'mfa_authenticator_push', 'mfa_totp_code'].includes(initialState.state)) {
-        const mfaResult = await handleMfa(helpers, initialState, callbacks);
-        if (mfaResult.result) return mfaResult.result;
-        initialState = mfaResult.currentState;
-        if (initialState.state === 'stay_signed_in') await clickStaySignedIn(helpers, true);
-        return { success: true, fallbackToManual: false };
-      }
-      if (initialState.state === 'stay_signed_in') {
+    // Cached SSO and passwordless accounts can start at MFA or skip password
+    // after the username. Handle each observed step instead of assuming a form order.
+    let current = await waitForState(helpers, states, AUTO_LOGIN_STEP_TIMEOUT_MS, signal);
+    for (let step = 0; step < 12; step++) {
+      signal?.throwIfAborted();
+      if (current.state === 'error') return fallback(helpers, callbacks, `Login page error: ${current.errorText}`);
+      if (current.state === 'not_login_page') return { success: true, fallbackToManual: false };
+      if (current.state === 'stay_signed_in') {
         await clickStaySignedIn(helpers, true);
         return { success: true, fallbackToManual: false };
       }
-      if (initialState.state === 'not_login_page') {
-        return { success: true, fallbackToManual: false };
+      if (current.state.startsWith('mfa_')) {
+        const mfa = await handleMfa(helpers, current, callbacks, signal);
+        if (mfa.result) return mfa.result;
+        current = mfa.currentState;
+        continue;
       }
+      const previous = current.state;
+      if (previous === 'account_picker') await clickAccountTile(helpers, credentials.username);
+      else if (previous === 'username_needed') await fillAndSubmitUsername(helpers, credentials.username);
+      else if (previous === 'password_needed') await fillAndSubmitPassword(helpers, credentials.password);
+      current = await waitForState(helpers, states.filter((s) => s !== previous), AUTO_LOGIN_STEP_TIMEOUT_MS, signal);
     }
-
-    if (initialState.state === 'username_needed') {
-      await fillAndSubmitUsername(helpers, credentials.username);
-      let afterUsername: PageStateResult;
-      try {
-        afterUsername = await waitForState(helpers, ['password_needed', 'error'], AUTO_LOGIN_STEP_TIMEOUT_MS);
-      } catch {
-        return fallback(helpers, callbacks, 'Timed out waiting for password field after username');
-      }
-      if (afterUsername.state === 'error') {
-        return fallback(helpers, callbacks, `Username error: ${afterUsername.errorText}`);
-      }
-    }
-
-    await fillAndSubmitPassword(helpers, credentials.password);
-    let afterPassword: PageStateResult;
-    try {
-      afterPassword = await waitForState(helpers,
-        ['mfa_method_picker', 'mfa_sms_code', 'mfa_authenticator_push', 'mfa_totp_code',
-         'stay_signed_in', 'not_login_page', 'error'],
-        AUTO_LOGIN_STEP_TIMEOUT_MS,
-      );
-    } catch {
-      return fallback(helpers, callbacks, 'Timed out waiting for response after password submission');
-    }
-    if (afterPassword.state === 'error') {
-      return fallback(helpers, callbacks, `Password error: ${afterPassword.errorText}`);
-    }
-
-    let currentState = afterPassword;
-    if (['mfa_method_picker', 'mfa_sms_code', 'mfa_totp_code', 'mfa_authenticator_push'].includes(currentState.state)) {
-      const mfaResult = await handleMfa(helpers, currentState, callbacks);
-      if (mfaResult.result) return mfaResult.result;
-      currentState = mfaResult.currentState;
-    }
-
-    if (currentState.state === 'stay_signed_in') {
-      await clickStaySignedIn(helpers, true);
-    }
-
-    return { success: true, fallbackToManual: false };
+    return fallback(helpers, callbacks, 'Sign-in needs attention');
   } catch (err) {
-    return fallback(helpers, callbacks, `Unexpected error: ${err}`);
+    if (signal?.aborted) return { success: false, fallbackToManual: false, reason: 'Sign-in finished' };
+    return fallback(helpers, callbacks, `Unable to finish automatic sign-in: ${err}`);
   }
 }

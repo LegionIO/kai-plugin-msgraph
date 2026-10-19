@@ -8,6 +8,13 @@ type MfaDialogProps = {
 
 export function MfaDialog({ type, onSubmit, onCancel }: MfaDialogProps) {
   const [code, setCode] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const submit = () => {
+    if (submitting || !code.trim()) return;
+    setSubmitting(true);
+    onSubmit(code.trim());
+    setCode('');
+  };
 
   const title = type === 'sms' ? 'Enter SMS Code' : 'Enter Authenticator Code';
   const subtitle = type === 'sms'
@@ -15,15 +22,19 @@ export function MfaDialog({ type, onSubmit, onCancel }: MfaDialogProps) {
     : 'Enter the code from your authenticator app';
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div role="dialog" aria-modal="true" aria-label={title} className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div className="bg-card rounded-xl shadow-2xl w-full max-w-sm p-6 border border-border">
         <h3 className="text-lg font-semibold text-foreground mb-1">{title}</h3>
         <p className="text-sm text-muted-foreground mb-4">{subtitle}</p>
         <input
-          type="text"
+          type="password"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          aria-label={title}
+          disabled={submitting}
           value={code}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCode(e.target.value)}
-          onKeyDown={(e: React.KeyboardEvent) => { if (e.key === 'Enter' && code.trim()) onSubmit(code.trim()); }}
+          onKeyDown={(e: React.KeyboardEvent) => { if (e.key === 'Enter') submit(); }}
           autoFocus
           placeholder="000000"
           className="w-full px-3 py-2 bg-muted border border-border rounded-lg text-center text-lg font-mono text-foreground focus:border-primary transition-colors tracking-widest"
@@ -39,11 +50,11 @@ export function MfaDialog({ type, onSubmit, onCancel }: MfaDialogProps) {
           </button>
           <button
             type="button"
-            onClick={() => code.trim() && onSubmit(code.trim())}
-            disabled={!code.trim()}
+            onClick={submit}
+            disabled={!code.trim() || submitting}
             className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
           >
-            Verify
+            {submitting ? 'Verifying…' : 'Verify'}
           </button>
         </div>
       </div>

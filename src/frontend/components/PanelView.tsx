@@ -2,8 +2,7 @@ import React, { useMemo, useState, useEffect, useRef, useLayoutEffect } from 're
 import type { PluginComponentProps } from '../hooks.ts';
 import { usePanelHeight } from '../hooks.ts';
 import type { MsgraphPluginState, NormalizedChat, NormalizedMessage, Presence, BodySegment } from '../../shared/types.ts';
-import { MfaDialog } from './MfaDialog.tsx';
-import { MfaApprovalDialog } from './MfaApprovalDialog.tsx';
+import { AuthFeedback, SignInButton } from './AuthFeedback.tsx';
 import { Avatar, AvatarStack } from './Avatar.tsx';
 import { ReactionPicker } from './ReactionPicker.tsx';
 import { SelfMenu } from './SelfMenu.tsx';
@@ -275,9 +274,6 @@ export function PanelView({ pluginState, onAction }: Props) {
     onAction('react-to-message', { chatId: s.activeChatId, messageId, reactionType, remove });
     setReactionTarget(null);
   };
-
-  const mfa = s.mfa ?? { needed: false, type: null, approvalNumber: null };
-
   if (!s.auth?.isAuthenticated) {
     return (
       <div
@@ -296,28 +292,12 @@ export function PanelView({ pluginState, onAction }: Props) {
             Sign in with your work account to list, read, and send Teams chats from Kai.
           </p>
         </div>
-        {s.auth?.autoLoginStatus && (
-          <p className="text-xs text-muted-foreground animate-pulse">{s.auth.autoLoginStatus}</p>
-        )}
-        {s.error && (
+        {s.error && !s.auth?.error && !s.auth?.isSigningIn && (
           <p className="text-xs text-destructive bg-destructive/10 px-3 py-1.5 rounded-md">{s.error}</p>
         )}
-        <button
-          type="button"
-          onClick={() => onAction('login')}
-          className="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
-        >
-          Sign in
-        </button>
+        <SignInButton state={s} onAction={onAction} />
 
-        {mfa.needed && mfa.type === 'push' && <MfaApprovalDialog approvalNumber={mfa.approvalNumber} />}
-        {mfa.needed && (mfa.type === 'sms' || mfa.type === 'totp') && (
-          <MfaDialog
-            type={mfa.type}
-            onSubmit={(code) => onAction('submit-mfa-code', { code })}
-            onCancel={() => onAction('cancel-mfa')}
-          />
-        )}
+        <AuthFeedback state={s} onAction={onAction} />
       </div>
     );
   }
@@ -710,14 +690,7 @@ export function PanelView({ pluginState, onAction }: Props) {
           onClose={() => setNewChatOpen(false)}
         />
       )}
-      {mfa.needed && mfa.type === 'push' && <MfaApprovalDialog approvalNumber={mfa.approvalNumber} />}
-      {mfa.needed && (mfa.type === 'sms' || mfa.type === 'totp') && (
-        <MfaDialog
-          type={mfa.type}
-          onSubmit={(code) => onAction('submit-mfa-code', { code })}
-          onCancel={() => onAction('cancel-mfa')}
-        />
-      )}
+      <AuthFeedback state={s} onAction={onAction} />
     </div>
   );
 }

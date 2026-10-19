@@ -36,6 +36,8 @@ export interface AuthStatus {
   jobTitle: string | null;
   minutesRemaining: number | null;
   autoLoginStatus: string | null;
+  isSigningIn: boolean;
+  error: string | null;
 }
 
 export interface CredentialStatus {
@@ -525,7 +527,7 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
 // ── Plugin API (subset used by this plugin) ──
 export interface AuthWindowHelpers {
   executeJavaScript: (code: string) => Promise<unknown>;
-  getURL: () => string;
+  getURL: () => string | Promise<string>;
   show: () => void;
   close: () => void;
   onDidNavigate: (cb: (url: string) => void) => void;
