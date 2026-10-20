@@ -35,7 +35,7 @@ export function graphPolicy(method: string, input: string, body?: unknown): Requ
   if (/\/(drive|drives|shares)(\/|$)/.test(p)) return { ...policy, workload: 'files' };
   if (p === '/$batch') return { ...policy, workload: 'mail', operation: 'batch', resource: 'me', mailbox: true, batch: true };
   if (/^\/(me|users\/[^/]+)\/(mailFolders|messages|sendMail)(\/|$)/.test(p)) {
-    const sending = /\/(sendMail|reply|replyAll|forward)$/.test(p);
+    const sending = /\/(sendMail|send|reply|replyAll|forward)$/.test(p);
     return { ...policy, workload: 'mail', operation: sending ? 'send' : read ? 'read' : 'write',
       resource: /^\/users\/([^/]+)/.exec(p)?.[1] ?? 'me', mailbox: true, rotation: true,
       scopes: sending ? any('Mail.Send') : read ? any('Mail.Read', 'Mail.ReadWrite') : any('Mail.ReadWrite') };

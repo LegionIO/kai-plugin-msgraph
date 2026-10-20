@@ -27,7 +27,12 @@ import { DEFAULT_TRACKED_SYSTEM_EVENTS, graphEventCategory, type TrackedSystemEv
 import * as tokenCache from './token-cache.js';
 import { getLogger } from './logger-singleton.js';
 import { graphFetch, executeBatchItem } from './request-transport.js';
-import { withRequestContext, preventsFallback, responseAttempts } from './request-scheduler.js';
+import { withRequestContext, preventsFallback, responseAttempts, serviceFetch } from './request-scheduler.js';
+
+export const MAX_MAIL_ATTACHMENT_BYTES = 150 * 1024 * 1024;
+const SMALL_MAIL_ATTACHMENT_BYTES = 3 * 1024 * 1024;
+const MAIL_UPLOAD_CHUNK_BYTES = 10 * 320 * 1024; // Sequential ranges smaller than 4 MiB.
+type OutgoingAttachment = NonNullable<OutgoingMail['attachments']>[number];
 
 type Fetch = typeof globalThis.fetch;
 
@@ -1151,6 +1156,9 @@ export class GraphClient {
   }
 
   async sendMail(mail: OutgoingMail): Promise<void> {
+    if (mail.attachments?.length) {
+      return this.sendMailWithAttachments('/me/messages', toGraphMail({ ...mail, attachments: undefined }), mail.attachments);
+    }
     await this.request('POST', '/me/sendMail', {
       body: {
         message: toGraphMail(mail),
@@ -1164,6 +1172,7 @@ export class GraphClient {
     mode: 'reply' | 'replyAll' | 'forward',
     mail: Partial<OutgoingMail> & { comment?: string },
   ): Promise<void> {
+    if (mode === 'forward' && !mail.to?.length) throw new Error('Forward requires at least one recipient.');
     const path =
       mode === 'reply' ? 'reply' : mode === 'replyAll' ? 'replyAll' : 'forward';
     const body: Record<string, unknown> = {};
@@ -1174,8 +1183,9 @@ export class GraphClient {
       bcc: mail.bcc,
       subject: mail.subject ?? '',
       bodyHtml: mail.bodyHtml ?? '',
-      attachments: mail.attachments,
     });
+    // Let Graph retain reply/reply-all recipients unless they are explicitly supplied.
+    if (!mail.to?.length || mode === 'forward') delete msg.toRecipients;
     if (mail.bodyHtml || mail.attachments?.length || mail.cc?.length || mail.bcc?.length) {
       body.message = msg;
       // Graph rejects an empty subject on message override for reply; omit it.
@@ -1186,7 +1196,91 @@ export class GraphClient {
     if (mode === 'forward') {
       body.toRecipients = (mail.to ?? []).map((a) => ({ emailAddress: { address: a.address, name: a.name ?? undefined } }));
     }
+    if (mail.attachments?.length) {
+      const create = mode === 'reply' ? 'createReply' : mode === 'replyAll' ? 'createReplyAll' : 'createForward';
+      return this.sendMailWithAttachments(`/me/messages/${encodeURIComponent(messageId)}/${create}`, body, mail.attachments);
+    }
     await this.request('POST', `/me/messages/${encodeURIComponent(messageId)}/${path}`, { body });
+  }
+
+  /** Attach files to a draft individually, then send once every upload has completed. */
+  private async sendMailWithAttachments(createPath: string, body: unknown, attachments: OutgoingAttachment[]): Promise<void> {
+    // Validate every size before creating anything in the mailbox.
+    for (const attachment of attachments) {
+      if (Buffer.byteLength(attachment.contentBytes, 'base64') > MAX_MAIL_ATTACHMENT_BYTES) {
+        throw new Error(`Attachment "${attachment.name}" exceeds the 150 MiB upload limit.`);
+      }
+    }
+    return withRequestContext(this.api, async () => {
+      const draft = await this.request<{ id: string }>('POST', createPath, { body });
+      if (!draft?.id) throw new GraphApiError('Draft creation did not return a message id; the email was not sent.', 0);
+      const draftPath = `/me/messages/${encodeURIComponent(draft.id)}`;
+      let sending = false;
+      try {
+        for (const attachment of attachments) await this.attachMailFile(draftPath, attachment);
+        sending = true;
+        await this.request('POST', `${draftPath}/send`);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const message = sending
+          ? `Send failed or could not be confirmed for draft ${draft.id}. Check Sent Items and the draft before retrying. ${detail}`
+          : `Attachment upload failed; draft ${draft.id} was retained and the email was not sent. ${detail}`;
+        throw new GraphApiError(message, err instanceof GraphApiError ? err.statusCode : 0, { draftId: draft.id },
+          err instanceof GraphApiError ? err.retry : undefined);
+      }
+    });
+  }
+
+  private async attachMailFile(draftPath: string, attachment: OutgoingAttachment): Promise<void> {
+    const bytes = Buffer.from(attachment.contentBytes, 'base64');
+    if (bytes.length < SMALL_MAIL_ATTACHMENT_BYTES) {
+      await this.request('POST', `${draftPath}/attachments`, {
+        body: {
+          '@odata.type': '#microsoft.graph.fileAttachment', name: attachment.name,
+          contentType: attachment.contentType, contentBytes: attachment.contentBytes,
+          ...(attachment.contentId ? { contentId: attachment.contentId, isInline: attachment.isInline ?? true } : {}),
+        },
+      });
+      return;
+    }
+    // Outlook uses a preauthorized URL, raw byte ranges, and an empty 201 final response.
+    // https://learn.microsoft.com/en-us/graph/outlook-large-attachments
+    const session = await this.request<{ uploadUrl: string }>('POST', `${draftPath}/attachments/createUploadSession`, {
+      body: { AttachmentItem: {
+        attachmentType: 'file', name: attachment.name, size: bytes.length, contentType: attachment.contentType,
+        ...(attachment.contentId ? { contentId: attachment.contentId, isInline: attachment.isInline ?? true } : {}),
+      } },
+    });
+    // Never log the preauthorized URL (its query contains a credential).
+    let uploadUrl: URL;
+    try { uploadUrl = new URL(session.uploadUrl); } catch { throw new Error('Microsoft returned an invalid attachment upload URL.'); }
+    if (uploadUrl.protocol !== 'https:' || uploadUrl.username || uploadUrl.password) {
+      throw new Error('Microsoft returned an invalid attachment upload URL.');
+    }
+    for (let offset = 0; offset < bytes.length;) {
+      const end = Math.min(offset + MAIL_UPLOAD_CHUNK_BYTES, bytes.length);
+      // No Graph Authorization header. Ambiguous writes are not automatically repeated.
+      const response = await serviceFetch(this.api, 'mail', 'attachment-upload', session.uploadUrl, {
+        method: 'PUT', redirect: 'error',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(end - offset),
+          'Content-Range': `bytes ${offset}-${end - 1}/${bytes.length}`,
+        },
+        body: new Uint8Array(bytes.subarray(offset, end)),
+      });
+      if (response.status === 201 && end === bytes.length) return;
+      if (response.status !== 200) throw new GraphApiError(`Attachment upload returned unexpected status ${response.status}.`, response.status);
+      let progress: { nextExpectedRanges?: string[] };
+      try { progress = await response.json(); } catch { throw new Error('Microsoft returned invalid attachment upload progress.'); }
+      // Outlook examples return a bare offset; other responses use offset- or offset-end.
+      const next = progress?.nextExpectedRanges?.[0]?.match(/^(\d+)(?:-\d*)?$/);
+      if (progress?.nextExpectedRanges?.length !== 1 || !next || Number(next[1]) !== end || end === bytes.length) {
+        throw new GraphApiError('Attachment upload did not confirm the expected byte range; the email was not sent.', 0);
+      }
+      offset = end;
+    }
+    throw new GraphApiError('Attachment upload did not confirm completion; the email was not sent.', 0);
   }
 
   async searchMail(

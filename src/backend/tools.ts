@@ -1,5 +1,5 @@
-import type { PluginAPI, GraphUser, GraphChatType, GraphTeam, GraphChannel, GraphMessage, MailAddress } from '../shared/types.js';
-import { GraphClient, normalizeChat, normalizeMessage } from './graph-client.js';
+import type { PluginAPI, GraphUser, GraphChatType, GraphTeam, GraphChannel, GraphMessage, MailAddress, OutgoingMail } from '../shared/types.js';
+import { GraphClient, MAX_MAIL_ATTACHMENT_BYTES, normalizeChat, normalizeMessage } from './graph-client.js';
 import * as tokenCache from './token-cache.js';
 import { buildMessageBody, withMessageRef, withFileReferences, type PendingImage } from '../shared/markdown.js';
 import {
@@ -15,7 +15,7 @@ import {
 import { getLogger } from './logger-singleton.js';
 import { resolveTrackedSystemEvents, type TrackedSystemEvents } from '../shared/system-events.js';
 import * as hostedContentCache from './hosted-content-cache.js';
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { homedir } from 'os';
 import { resolve, extname, basename, dirname, isAbsolute } from 'path';
 import { randomUUID } from 'crypto';
@@ -73,11 +73,17 @@ function expandPath(p: string): string {
 }
 
 /** Read a local file with ~ expansion and clear ENOENT/EISDIR errors. */
-async function readLocalFile(raw: string): Promise<{ abs: string; buf: Buffer; name: string; ext: string }> {
+async function readLocalFile(raw: string, maxBytes?: number): Promise<{ abs: string; buf: Buffer; name: string; ext: string }> {
   const abs = expandPath(raw);
   let buf: Buffer;
   try {
+    if (maxBytes !== undefined) {
+      const info = await stat(abs);
+      if (!info.isFile()) throw new Error('Attachment path must refer to a regular file.');
+      if (info.size > maxBytes) throw new Error(`File exceeds the ${maxBytes / (1024 * 1024)} MiB attachment limit.`);
+    }
     buf = await readFile(abs);
+    if (maxBytes !== undefined && buf.length > maxBytes) throw new Error('File grew beyond the attachment size limit.');
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     throw new Error(
@@ -104,6 +110,39 @@ function sniffImageMime(buf: Buffer, ext: string): string | null {
 /** Best-effort MIME for any file: image sniff first, then extension map, else octet-stream. */
 function guessFileMime(buf: Buffer, ext: string): string {
   return sniffImageMime(buf, ext) ?? FILE_MIME_BY_EXT[ext.toLowerCase()] ?? 'application/octet-stream';
+}
+
+type MailAttachmentInput = { name: string; contentType?: string; contentBytes: string };
+const MAIL_ATTACHMENT_PROPERTIES = {
+  attachments: {
+    type: 'array', description: 'Optional attachments with base64 contents. Prefer filePaths for files already on disk.',
+    items: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        contentType: { type: 'string' },
+        contentBytes: { type: 'string', description: 'Base64-encoded file contents.' },
+      },
+      required: ['name', 'contentBytes'],
+    },
+  },
+  filePaths: {
+    type: 'array', items: { type: 'string' },
+    description: 'Local files to attach, using absolute paths or ~/... on the plugin host. The plugin reads and uploads them without passing bytes through the model. Can be combined with attachments. Large files use chunked uploads; max 150 MiB per file, subject to mailbox limits.',
+  },
+};
+
+async function prepareMailAttachments(attachments?: MailAttachmentInput[], filePaths?: string[]): Promise<OutgoingMail['attachments']> {
+  const out = (attachments ?? []).map((a) => ({ name: a.name, contentBytes: a.contentBytes, contentType: a.contentType ?? 'application/octet-stream' }));
+  if (filePaths != null && !Array.isArray(filePaths)) throw new Error('filePaths must be an array of local file paths.');
+  for (const path of filePaths ?? []) {
+    if (typeof path !== 'string' || (!isAbsolute(path) && !path.startsWith('~/'))) {
+      throw new Error('Each filePaths entry must be an absolute file path or start with ~/.');
+    }
+    const { buf, name, ext } = await readLocalFile(path, MAX_MAIL_ATTACHMENT_BYTES);
+    out.push({ name, contentType: guessFileMime(buf, ext), contentBytes: buf.toString('base64') });
+  }
+  return out.length ? out : undefined;
 }
 
 /** Read image files from disk and turn them into PendingImage entries for the
@@ -1739,7 +1778,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
       name: 'send-mail',
       description:
         'Send a new email as the signed-in user. Recipients may be plain email addresses. Body accepts markdown ' +
-        '(bold/italic/code/links) or raw HTML when contentType="html".',
+        '(bold/italic/code/links) or raw HTML when contentType="html". Use filePaths to attach local files without embedding base64 in the tool call. Large attachments are uploaded in chunks before sending.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1749,36 +1788,26 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           subject: { type: 'string' },
           body: { type: 'string' },
           contentType: { type: 'string', enum: ['markdown', 'html'], default: 'markdown' },
-          attachments: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                name: { type: 'string' },
-                contentType: { type: 'string' },
-                contentBytes: { type: 'string', description: 'Base64-encoded file contents.' },
-              },
-              required: ['name', 'contentBytes'],
-            },
-          },
+          ...MAIL_ATTACHMENT_PROPERTIES,
         },
         required: ['to', 'subject', 'body'],
         additionalProperties: false,
       },
       execute: async (input) => {
         try {
-          const client = await ensureAuthenticated();
-          const { to, cc, bcc, subject, body, contentType, attachments } = input as {
+          const { to, cc, bcc, subject, body, contentType, attachments, filePaths } = input as {
             to: string[]; cc?: string[]; bcc?: string[]; subject: string; body: string;
             contentType?: 'markdown' | 'html';
-            attachments?: Array<{ name: string; contentType?: string; contentBytes: string }>;
+            attachments?: MailAttachmentInput[]; filePaths?: string[];
           };
+          const files = await prepareMailAttachments(attachments, filePaths);
+          const client = await ensureAuthenticated();
           const addrs = (list?: string[]): MailAddress[] => (list ?? []).map((a) => ({ name: null, address: a }));
           const md = buildMessageBody(body);
           const bodyHtml = contentType === 'html' ? body : (md.body.contentType === 'html' ? md.body.content : `<p>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>')}</p>`);
           await client.sendMail({
             to: addrs(to), cc: addrs(cc), bcc: addrs(bcc), subject, bodyHtml,
-            attachments: attachments?.map((a) => ({ name: a.name, contentType: a.contentType ?? 'application/octet-stream', contentBytes: a.contentBytes })),
+            attachments: files,
           });
           return { success: true, to, subject };
         } catch (err) { return errResult(err); }
@@ -1786,7 +1815,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
     },
     {
       name: 'reply-to-mail',
-      description: 'Reply, reply-all, or forward an existing message. For forward, provide `to`.',
+      description: 'Reply, reply-all, or forward an existing message. For forward, provide `to`. Attach local files with filePaths, or use attachments for base64 contents. Attachments are added to a reply/forward draft before it is sent; large files use chunked uploads.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1795,22 +1824,27 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           body: { type: 'string' },
           contentType: { type: 'string', enum: ['markdown', 'html'], default: 'markdown' },
           to: { type: 'array', items: { type: 'string' }, description: 'Required for forward.' },
+          ...MAIL_ATTACHMENT_PROPERTIES,
         },
         required: ['messageId', 'body'],
         additionalProperties: false,
       },
       execute: async (input) => {
         try {
-          const client = await ensureAuthenticated();
-          const { messageId, mode, body, contentType, to } = input as {
+          const { messageId, mode, body, contentType, to, attachments, filePaths } = input as {
             messageId: string; mode?: 'reply' | 'replyAll' | 'forward'; body: string;
             contentType?: 'markdown' | 'html'; to?: string[];
+            attachments?: MailAttachmentInput[]; filePaths?: string[];
           };
+          if (mode === 'forward' && !to?.length) throw new Error('Forward requires at least one recipient.');
+          const files = await prepareMailAttachments(attachments, filePaths);
+          const client = await ensureAuthenticated();
           const md = buildMessageBody(body);
           const bodyHtml = contentType === 'html' ? body : (md.body.contentType === 'html' ? md.body.content : `<p>${body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>')}</p>`);
           await client.replyMail(messageId, mode ?? 'reply', {
             bodyHtml,
             to: (to ?? []).map((a) => ({ name: null, address: a })),
+            attachments: files,
           });
           return { success: true, messageId, mode: mode ?? 'reply' };
         } catch (err) { return errResult(err); }
