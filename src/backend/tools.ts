@@ -15,9 +15,9 @@ import {
 import { getLogger } from './logger-singleton.js';
 import { resolveTrackedSystemEvents, type TrackedSystemEvents } from '../shared/system-events.js';
 import * as hostedContentCache from './hosted-content-cache.js';
-import { readFile } from 'fs/promises';
+import { mkdir, readFile, writeFile } from 'fs/promises';
 import { homedir } from 'os';
-import { resolve, extname, basename } from 'path';
+import { resolve, extname, basename, dirname, isAbsolute } from 'path';
 import { randomUUID } from 'crypto';
 
 const AVAIL_VALUES = ['Available', 'Busy', 'DoNotDisturb', 'BeRightBack', 'Away', 'Offline'] as const;
@@ -254,6 +254,27 @@ type ModelContentPart =
 function partForMedia(base64: string, mediaType: string, filename?: string): ModelContentPart {
   if (mediaType.startsWith('image/')) return { type: 'image', data: base64, mediaType };
   return { type: 'file', data: base64, mediaType, ...(filename ? { filename } : {}) };
+}
+
+/** Save mode deliberately omits model content so Kai's media budget cannot drop the file. */
+async function attachmentOutput(base64: string, mediaType: string, filename?: string, savePath?: string): Promise<{
+  bytes: number;
+  path?: string;
+  _modelContent?: ModelContentPart[];
+}> {
+  const bytes = Buffer.byteLength(base64, 'base64');
+  if (!savePath) return { bytes, _modelContent: [partForMedia(base64, mediaType, filename)] };
+
+  await mkdir(dirname(savePath), { recursive: true, mode: 0o700 });
+  try {
+    await writeFile(savePath, Buffer.from(base64, 'base64'), { flag: 'wx', mode: 0o600 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`File already exists: ${savePath}. Choose a different savePath.`);
+    }
+    throw err;
+  }
+  return { bytes, path: savePath };
 }
 
 type MailSummary = {
@@ -1900,7 +1921,8 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
     {
       name: 'get-attachment',
       description:
-        'Fetch a file/attachment from a Teams message or an Outlook mail and return its contents so you can read it — images (screenshots, photos), PDFs, and other documents. ' +
+        'Fetch a file/attachment from a Teams message or an Outlook mail. By default, return its contents to the model; set savePath to save it locally and return only metadata and the file path. ' +
+        'Use savePath for local processing or when direct contents are omitted by the model context/media limits. ' +
         'For Teams, pass source="teams" with chatId + messageId; the attachment is picked by name, index, or attachmentId (omit all to grab the first file). ' +
         'For mail, pass source="mail" with messageId; use get-mail first to list attachment ids/names. ' +
         'Name matching is tolerant of whitespace/case; when a name is ambiguous or fails, the error lists available attachments with [index] — retry with that index. ' +
@@ -1914,16 +1936,28 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           attachmentId: { type: 'string', description: 'Mail attachment id (from get-mail), or Teams attachment id.' },
           name: { type: 'string', description: 'Match an attachment by file name (tolerant of case/whitespace, falls back to substring).' },
           index: { type: 'number', description: 'Zero-based index into the message\'s attachment list (see the [index] hints in an error). Most reliable selector.' },
+          savePath: { type: 'string', minLength: 1, description: 'Optional full local file path (absolute or ~/...). Saves the attachment here instead of sending its contents to the model. Creates parent directories; refuses to overwrite existing files. Omit for direct model content.' },
         },
         required: ['source', 'messageId'],
         additionalProperties: false,
       },
       execute: async (input) => {
         try {
-          const client = await ensureAuthenticated();
-          const { source, messageId, chatId, attachmentId, name, index } = input as {
-            source: 'teams' | 'mail'; messageId: string; chatId?: string; attachmentId?: string; name?: string; index?: number;
+          const { source, messageId, chatId, attachmentId, name, index, savePath } = input as {
+            source: 'teams' | 'mail'; messageId: string; chatId?: string; attachmentId?: string; name?: string; index?: number; savePath?: string;
           };
+          let outputPath: string | undefined;
+          if (savePath != null) {
+            if (typeof savePath !== 'string' || !savePath.trim() || savePath.includes('\0')) {
+              throw new Error('savePath must be a non-empty local file path.');
+            }
+            // The plugin host's working directory may differ from the conversation's.
+            if (!isAbsolute(savePath) && !savePath.startsWith('~/')) {
+              throw new Error('savePath must be an absolute file path or start with ~/.');
+            }
+            outputPath = expandPath(savePath);
+          }
+          const client = await ensureAuthenticated();
           // Filenames from Graph can carry stray whitespace / zero-width chars,
           // so match tolerantly: normalize (trim, strip zero-width, collapse
           // whitespace, casefold) and compare exact-then-substring rather than
@@ -1975,8 +2009,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
             if (!got) return { error: `Attachment "${chosen.name ?? 'attachment'}" has no downloadable content (may be an item/reference attachment).` };
             return {
               success: true, source, messageId, name: chosen.name ?? 'attachment', mediaType: got.mediaType,
-              bytes: Math.floor((got.base64.length * 3) / 4),
-              _modelContent: [partForMedia(got.base64, got.mediaType, chosen.name ?? undefined)],
+              ...await attachmentOutput(got.base64, got.mediaType, chosen.name ?? undefined, outputPath),
             };
           }
 
@@ -2028,8 +2061,7 @@ export function buildMsgraphTools(deps: ToolDeps): ToolDefinition[] {
           }
           return {
             success: true, source, chatId, messageId, name: chosen.name ?? 'attachment', mediaType,
-            bytes: Math.floor((base64.length * 3) / 4),
-            _modelContent: [partForMedia(base64, mediaType, chosen.name ?? undefined)],
+            ...await attachmentOutput(base64, mediaType, chosen.name ?? undefined, outputPath),
           };
         } catch (err) {
           return errResult(err);
