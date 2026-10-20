@@ -1,6 +1,6 @@
 {
   "name": "kai-plugin-msgraph",
-  "version": "0.5.20",
+  "version": "0.5.21",
   "author": "Kyle Boyer <https://github.com/KyleBoyer>",
   "private": true,
   "type": "module",
