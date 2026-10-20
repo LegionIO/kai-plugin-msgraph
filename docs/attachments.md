@@ -80,3 +80,12 @@ If an upload fails, the error identifies the retained draft and the plugin does
 not send it. An uncertain final send is not automatically repeated; check Sent
 Items and the draft before retrying to avoid duplicate emails. Messages without
 attachments continue to use the direct send/reply endpoints.
+
+## Electron transport verification
+
+Run `node scripts/test-electron-upload.mjs /path/to/Electron` with an Electron
+executable matching Kai's version. This checks both email tools with a synthetic
+5.6 MB CSV against a loopback server, using direct and streamed request bodies.
+No Microsoft requests or real emails are sent. It verifies the bytes, chunk
+ranges, and transport-generated `Content-Length`: Electron rejects explicitly
+setting that header, so the plugin leaves it to `net.fetch`.

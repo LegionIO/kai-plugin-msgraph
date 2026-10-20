@@ -1264,9 +1264,10 @@ export class GraphClient {
         method: 'PUT', redirect: 'error',
         headers: {
           'Content-Type': 'application/octet-stream',
-          'Content-Length': String(end - offset),
           'Content-Range': `bytes ${offset}-${end - 1}/${bytes.length}`,
         },
+        // Electron net.fetch rejects an explicit Content-Length with ERR_INVALID_ARGUMENT.
+        // A fixed-size body lets the transport add the correct wire header itself.
         body: new Uint8Array(bytes.subarray(offset, end)),
       });
       if (response.status === 201 && end === bytes.length) return;

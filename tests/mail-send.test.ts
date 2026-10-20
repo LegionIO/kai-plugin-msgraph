@@ -54,6 +54,8 @@ function harness(intercept?: (req: Request) => Response | undefined) {
     fetch: async (input: string | URL, init?: RequestInit) => {
       const url = String(input);
       const req: Request = { url, path: new URL(url).pathname, method: init?.method ?? 'GET', headers: new Headers(init?.headers) };
+      // Match Electron's forbidden-header behavior; Node fetch alone accepts this header.
+      if (req.headers.has('content-length')) throw new Error('net::ERR_INVALID_ARGUMENT');
       if (typeof init?.body === 'string') req.body = JSON.parse(init.body);
       else if (init?.body instanceof Uint8Array) req.bytes = Buffer.from(init.body);
       requests.push(req);
@@ -100,7 +102,7 @@ test('send-mail uploads a 5.6 MB local CSV in ordered chunks before sending once
   for (const chunk of chunks) {
     assert.equal(chunk.headers.has('authorization'), false);
     assert.equal(chunk.headers.get('content-type'), 'application/octet-stream');
-    assert.equal(chunk.headers.get('content-length'), String(chunk.bytes!.length));
+    assert.equal(chunk.headers.has('content-length'), false);
   }
 });
 
