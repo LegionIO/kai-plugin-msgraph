@@ -82,8 +82,9 @@ test('repeated sign-in clicks share one session, window, and completion', async 
   assert.equal(h.calls.filter((c) => c.get('grant_type') === 'authorization_code').length, 1);
 });
 
-test('expired access tokens share one silent refresh without opening a window', async () => {
+for (const autoReconnect of [undefined, false]) test(`expired access tokens share silent refresh (autoReconnect=${autoReconnect})`, async () => {
   seed(); const h = harness();
+  h.data.preferences = { autoReconnect };
   const results = await Promise.all(Array.from({ length: 8 }, () => auth.ensureAccessToken(h.api, { allowInteractive: false })));
   assert.ok(results.every((t) => t === jwt)); assert.equal(h.calls.length, 1); assert.equal(h.windows.length, 0);
 });
@@ -99,6 +100,75 @@ test('revoked refresh tokens recover automatically across concurrent background 
   assert.equal(h.windows.length, 1); assert.equal(cache.getRefreshToken(), 'new-refresh');
 });
 
+test('disabled recovery blocks automatic login across token paths while manual sign-in still works', async () => {
+  seed(); const h = harness();
+  h.data.preferences = { autoReconnect: false };
+  h.respond(async (form) => form.get('refresh_token') === 'expired-refresh' ? invalidGrant() : tokenResponse());
+  await Promise.all([
+    auth.ensureAccessToken(h.api, { allowInteractive: false }),
+    auth.ensureAccessToken(h.api),
+    auth.forceRefresh(h.api),
+    auth.acquireFociAccessToken(h.api, 'secondary'),
+  ].map((request) => assert.rejects(request, /Automatic sign-in is disabled/)));
+  assert.equal(h.windows.length, 0);
+  assert.equal(h.state.auth.isAuthenticated, false);
+  assert.equal(h.state.auth.isSigningIn, false);
+  assert.match(h.state.auth.error, /Sign in to reconnect/);
+  assert.equal(cache.getRefreshToken(), 'expired-refresh');
+
+  const manual = auth.acquireTokenInteractive(h.api, { forceRefresh: true });
+  await flush(); assert.equal(h.windows.length, 1);
+  h.complete(); await manual;
+  assert.equal(h.state.auth.error, null);
+  assert.equal(await auth.ensureAccessToken(h.api, { allowInteractive: false }), jwt);
+  assert.equal(h.data.preferences.autoReconnect, false);
+});
+
+test('re-enabling recovery retries the rejected session without a restart', async () => {
+  seed(); const h = harness();
+  h.data.preferences = { autoReconnect: false };
+  h.respond(async (form) => form.get('refresh_token') === 'expired-refresh' ? invalidGrant() : tokenResponse());
+  await assert.rejects(auth.ensureAccessToken(h.api, { allowInteractive: false }), /Automatic sign-in is disabled/);
+  h.data.preferences.autoReconnect = true;
+  const recovery = auth.ensureAccessToken(h.api, { allowInteractive: false });
+  await flush(); assert.equal(h.windows.length, 1);
+  // Turning it off again does not cancel a login that is already underway.
+  h.data.preferences.autoReconnect = false;
+  const joined = auth.ensureAccessToken(h.api, { allowInteractive: false });
+  h.complete();
+  assert.deepEqual(await Promise.all([recovery, joined]), [jwt, jwt]);
+  assert.equal(h.windows.length, 1);
+  assert.equal(h.state.auth.error, null);
+});
+
+test('turning recovery off during silent refresh prevents a new sign-in window', async () => {
+  seed(); const h = harness(); const response = deferred<Response>();
+  h.data.preferences = { autoReconnect: true };
+  h.respond(() => response.promise.then((value) => value.clone()));
+  const request = auth.ensureAccessToken(h.api, { allowInteractive: false });
+  const rejected = assert.rejects(request, /Automatic sign-in is disabled/);
+  await flush(); assert.equal(h.calls.length, 1);
+  h.data.preferences.autoReconnect = false;
+  response.resolve(invalidGrant()); await rejected;
+  assert.equal(h.windows.length, 0);
+});
+
+for (const autoReconnect of [undefined, false]) test(`restored expired sessions honor autoReconnect=${autoReconnect}`, async () => {
+  const h = harness();
+  h.data.preferences = { autoReconnect };
+  h.data.graphToken = { refreshTokenEnc: 'expired-refresh', expiresAt: 0, objectId: 'user', tenantId: 'tenant', email: 'user@example.test' };
+  cache.loadPersisted(h.api);
+  h.respond(async (form) => form.get('refresh_token') === 'expired-refresh' ? invalidGrant() : tokenResponse());
+  const request = auth.ensureAccessToken(h.api, { allowInteractive: false });
+  if (autoReconnect === false) {
+    await assert.rejects(request, /Automatic sign-in is disabled/);
+    assert.equal(h.windows.length, 0);
+  } else {
+    await flush(); assert.equal(h.windows.length, 1);
+    h.complete(); assert.equal(await request, jwt);
+  }
+});
+
 test('Graph 401 with an invalid refresh token reauthenticates and retries the request', async () => {
   seed(); cache.set({ ...cache.get()!, expiresAt: Date.now() + 3600000 });
   const h = harness(); let graphCalls = 0;
@@ -109,6 +179,23 @@ test('Graph 401 with an invalid refresh token reauthenticates and retries the re
   const request = new GraphClient(h.api, false).getMe();
   await flush(); assert.equal(h.windows.length, 1);
   h.complete(); assert.equal((await request).id, 'user'); assert.equal(graphCalls, 2);
+});
+
+test('Graph 401 with recovery disabled expires the cached token and asks for sign-in', async () => {
+  seed(); cache.set({ ...cache.get()!, expiresAt: Date.now() + 3600000 });
+  const h = harness(); let graphCalls = 0;
+  h.data.preferences = { autoReconnect: false };
+  h.state.auth.isAuthenticated = true;
+  h.respond(async (_form, url) => {
+    if (url.includes('graph.microsoft.com')) { graphCalls++; return new Response(null, { status: 401 }); }
+    return invalidGrant();
+  });
+  await assert.rejects(new GraphClient(h.api, false).getMe(), /Automatic sign-in is disabled/);
+  assert.equal(graphCalls, 1);
+  assert.equal(h.windows.length, 0);
+  assert.equal(cache.isTokenValid(), false);
+  assert.equal(h.state.auth.isAuthenticated, false);
+  assert.match(h.state.auth.error, /Sign in to reconnect/);
 });
 
 test('a logical action can continue after same-account silent recovery without losing its retry budget', async () => {
@@ -222,7 +309,7 @@ test('an old failed request cannot join a login started after explicit sign-out'
 });
 
 test('a signed-out background request never initiates login', async () => {
-  const h = harness(); await assert.rejects(auth.ensureAccessToken(h.api, { allowInteractive: false }), /Not signed in/);
+  const h = harness(true); await assert.rejects(auth.ensureAccessToken(h.api, { allowInteractive: false }), /Not signed in/);
   assert.equal(h.windows.length, 0); assert.equal(h.calls.length, 0);
 });
 

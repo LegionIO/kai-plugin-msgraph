@@ -7,14 +7,22 @@ import { PanelView } from '../src/frontend/components/PanelView.tsx';
 import { MailPanelView } from '../src/frontend/components/MailPanelView.tsx';
 import type { MsgraphPluginState } from '../src/shared/types.ts';
 
-function render(Component: any, overrides = {}) {
+function render(Component: any, overrides = {}, pluginConfig = {}) {
   const pluginState = {
     auth: { isAuthenticated: false, isSigningIn: true, autoLoginStatus: 'Waiting for Microsoft Authenticator', error: null },
     mfa: { needed: false, type: null, approvalNumber: null },
     ...overrides,
   } as MsgraphPluginState;
-  return renderToStaticMarkup(<Component pluginName="msgraph" pluginState={pluginState} onAction={() => {}} />);
+  return renderToStaticMarkup(<Component pluginName="msgraph" pluginState={pluginState} pluginConfig={pluginConfig} onAction={() => {}} />);
 }
+test('Settings defaults automatic sign-in to on and displays a saved opt-out', () => {
+  const checkbox = /<input[^>]*type="checkbox"[^>]*><span>Automatically sign in again<\/span>/;
+  const defaultHtml = render(SettingsView);
+  assert.match(defaultHtml.match(checkbox)?.[0] ?? '', /checked=""/);
+  const disabledHtml = render(SettingsView, {}, { preferences: { autoReconnect: false } });
+  assert.match(disabledHtml, checkbox);
+  assert.doesNotMatch(disabledHtml.match(checkbox)![0], /checked=/);
+});
 test('Settings exposes bounded throttle wait and adaptive routing defaults', () => {
   const html=render(SettingsView);
   assert.match(html,/Maximum throttle wait \(seconds\)/);

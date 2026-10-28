@@ -112,6 +112,7 @@ function getPreferences(api: PluginAPI): UserPreferences {
   const data = api.config.getPluginData();
   const prefs = (data.preferences ?? {}) as Partial<UserPreferences>;
   return {
+    autoReconnect: prefs.autoReconnect !== false,
     notifications: prefs.notifications ?? true,
     pollIntervalSeconds: prefs.pollIntervalSeconds ?? DEFAULT_POLL_INTERVAL_SECONDS,
     debugLogging: prefs.debugLogging ?? false,
@@ -1528,7 +1529,9 @@ async function handleSettingsAction(api: PluginAPI, action: string, data?: unkno
       case 'set-preference': {
         const { key, value } = data as { key: keyof UserPreferences; value: unknown };
         const current = getPreferences(api);
-        api.config.setPluginData('preferences', { ...current, [key]: key === 'maxThrottleWaitSeconds' ? throttleWaitSeconds(value) : key === 'adaptiveFociRouting' ? value !== false : value });
+        const normalized = key === 'maxThrottleWaitSeconds' ? throttleWaitSeconds(value)
+          : key === 'adaptiveFociRouting' || key === 'autoReconnect' ? value !== false : value;
+        api.config.setPluginData('preferences', { ...current, [key]: normalized });
         if (key === 'mailSignatureHtml' || key === 'mailSignatureAutoNew' || key === 'mailSignatureAutoReply') {
           void loadSignature(api);
         }

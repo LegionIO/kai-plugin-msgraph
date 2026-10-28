@@ -28,6 +28,11 @@
       "preferences": {
         "type": "object",
         "properties": {
+          "autoReconnect": {
+            "type": "boolean",
+            "default": true,
+            "description": "Automatically retry sign-in when an existing Microsoft session expires or is revoked"
+          },
           "notifications": {
             "type": "boolean",
             "default": true,

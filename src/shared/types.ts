@@ -440,6 +440,8 @@ export interface MsgraphPluginState {
 
 // ── Preferences / Config ──
 export interface UserPreferences {
+  /** Retry sign-in for expired/revoked sessions. Defaults to true; silent token refresh always remains enabled. */
+  autoReconnect?: boolean;
   maxThrottleWaitSeconds?: number;
   adaptiveFociRouting?: boolean;
   notifications: boolean;

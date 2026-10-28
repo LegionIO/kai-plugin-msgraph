@@ -22,7 +22,7 @@ import {
   AUTH_TIMEOUT_MS,
   AUTH_PARTITION,
 } from '../shared/constants.js';
-import type { PluginAPI, GraphTokenData, MfaState, AuthWindowHelpers } from '../shared/types.js';
+import type { PluginAPI, GraphTokenData, MfaState, AuthWindowHelpers, UserPreferences } from '../shared/types.js';
 import * as tokenCache from './token-cache.js';
 import { hasCredentials, getCredentials } from './credential-store.js';
 import { performAutoLogin, isMicrosoftLoginHost } from './auto-login.js';
@@ -432,8 +432,8 @@ async function doInteractive(api: PluginAPI, attempt: SignInAttempt): Promise<Gr
   return token;
 }
 
-// Background requests may recover an existing rejected session once. A failed
-// or cancelled attempt requires an explicit click; polling must not prompt again.
+// When enabled, background requests may recover an existing rejected session once.
+// A failed or cancelled attempt requires an explicit click; polling must not prompt again.
 async function finishRecovery(promise: Promise<GraphTokenData>): Promise<GraphTokenData> {
   const token = await promise;
   const context = currentRequestContext();
@@ -454,6 +454,18 @@ async function recoverAuthentication(api: PluginAPI, error: unknown, session: nu
   if (!needsReauthentication(error) || !tokenCache.hasRefreshToken()) throw error;
   if (inFlight) return finishRecovery(inFlight.promise);
   api.state.set('auth.isAuthenticated', false);
+  // Read the current preference at the point of recovery so changes apply to
+  // startup, background refresh, Graph 401s, and secondary tokens immediately.
+  const prefs = api.config.getPluginData().preferences as Partial<UserPreferences> | undefined;
+  if (prefs?.autoReconnect === false) {
+    // A rejected session can still have a locally unexpired token. Prevent the
+    // next state publication/request from treating that token as authenticated.
+    tokenCache.set({ ...tokenCache.get()!, accessToken: '', expiresAt: 0 });
+    clearFociTokens();
+    const message = 'Session expired. Automatic sign-in is disabled. Sign in to reconnect.';
+    api.state.set('auth.error', message);
+    throw new Error(message);
+  }
   if (automaticAttemptSession === session) throw new Error('Session expired. Sign in to reconnect.');
   const promise = acquireTokenInteractive(api, { forceRefresh: true });
   inFlight!.recoveringSession = session;
@@ -461,7 +473,7 @@ async function recoverAuthentication(api: PluginAPI, error: unknown, session: nu
 }
 
 export interface EnsureOptions {
-  /** Allow a first login. Existing rejected sessions still get one automatic recovery attempt. */
+  /** Allow a first login. Existing rejected sessions get one recovery attempt when autoReconnect is enabled. */
   allowInteractive?: boolean;
 }
 

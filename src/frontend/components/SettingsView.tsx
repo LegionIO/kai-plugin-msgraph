@@ -325,6 +325,20 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
           </div>
         )}
         <AuthFeedback state={s} onAction={onAction} />
+        <label className="flex items-center gap-2 text-xs mt-3">
+          <input
+            type="checkbox"
+            checked={prefs.autoReconnect !== false}
+            onChange={(e) => onAction('set-preference', { key: 'autoReconnect', value: e.target.checked })}
+            className="accent-primary"
+          />
+          <span>Automatically sign in again</span>
+        </label>
+        <p className="text-xs text-muted-foreground mt-1">
+          Retry sign-in when your Microsoft session expires or is revoked. Uses saved credentials when available;
+          Microsoft may still ask for MFA. If sign-in fails or you cancel, use Sign in to retry. Normal token
+          refresh stays enabled when this is off.
+        </p>
       </Section>
 
       <Section title="Auto-login credentials">
