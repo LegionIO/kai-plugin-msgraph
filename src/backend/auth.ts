@@ -317,6 +317,7 @@ async function doInteractive(api: PluginAPI, attempt: SignInAttempt): Promise<Gr
       if (!credentials) { helpers.show(); return; }
       const active = () => live() && !windowFinished;
       const autoLoginHelpers: AutoLoginHelpers = {
+        waitForMfaActivity: helpers.waitForMfaActivity,
         executeJavaScript: (code) => {
           if (!active()) return Promise.reject(new Error('Sign-in finished'));
           return helpers.executeJavaScript(code);

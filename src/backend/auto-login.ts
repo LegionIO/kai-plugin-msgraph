@@ -49,6 +49,8 @@ interface PageStateResult {
 }
 
 export interface AutoLoginHelpers {
+  /** Wait at MFA only; credentials and valid-cookie redirects remain automatic. */
+  waitForMfaActivity?: () => Promise<boolean>;
   executeJavaScript: (code: string) => Promise<unknown>;
   getURL: () => string | Promise<string>;
   show: () => void;
@@ -287,6 +289,19 @@ async function handleMfa(
   signal?: AbortSignal,
 ): Promise<{ result: AutoLoginResult | null; currentState: PageStateResult }> {
   let currentState = startState;
+  if (helpers.waitForMfaActivity) {
+    if (!await helpers.waitForMfaActivity()) {
+      return { result: { success: false, fallbackToManual: false, reason: 'MFA paused while inactive.' }, currentState };
+    }
+    // The challenge can expire or finish while waiting. Never act on a stale screen.
+    currentState = await waitForState(helpers,
+      ['mfa_method_picker', 'mfa_sms_code', 'mfa_totp_code', 'mfa_authenticator_push', 'stay_signed_in', 'not_login_page', 'error'],
+      AUTO_LOGIN_STEP_TIMEOUT_MS, signal);
+    if (currentState.state === 'error') return {
+      result: fallback(helpers, callbacks, 'The sign-in challenge expired or was rejected. Sign in again.'), currentState,
+    };
+    if (!currentState.state.startsWith('mfa_')) return { result: null, currentState };
+  }
 
   if (currentState.state === 'mfa_method_picker') {
     const clickedMethod = await clickMfaMethod(helpers);
@@ -307,6 +322,8 @@ async function handleMfa(
       return { result: fallback(helpers, callbacks, `MFA method error: ${afterMethodPick.errorText}`), currentState };
     }
     currentState = afterMethodPick;
+    // Recheck activity after the network transition before presenting the challenge.
+    if (currentState.state.startsWith('mfa_')) return handleMfa(helpers, currentState, callbacks, signal);
   }
 
   if (currentState.state === 'mfa_sms_code' || currentState.state === 'mfa_totp_code') {
@@ -319,6 +336,10 @@ async function handleMfa(
       return { result: fallback(helpers, callbacks, 'MFA code entry cancelled'), currentState };
     }
     signal?.throwIfAborted();
+    if (helpers.waitForMfaActivity && !await helpers.waitForMfaActivity()) {
+      callbacks.onMfaApprovalComplete();
+      return { result: { success: false, fallbackToManual: false, reason: 'MFA paused while inactive.' }, currentState };
+    }
     await fillAndSubmitMfaCode(helpers, code);
     let afterMfa: PageStateResult;
     try {
@@ -337,8 +358,8 @@ async function handleMfa(
     currentState = afterMfa;
   }
 
-  if (startState.state === 'mfa_authenticator_push' || currentState.state === 'mfa_authenticator_push') {
-    let approvalNumber = currentState.approvalNumber || startState.approvalNumber;
+  if (currentState.state === 'mfa_authenticator_push') {
+    let approvalNumber = currentState.approvalNumber;
     callbacks.onMfaApprovalNeeded(approvalNumber);
     let afterApproval: PageStateResult;
     try {

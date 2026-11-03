@@ -535,6 +535,7 @@ export const DEFAULT_TOOL_PERMISSIONS: ToolPermissions = {
 
 // ── Plugin API (subset used by this plugin) ──
 export interface AuthWindowHelpers {
+  waitForMfaActivity?: () => Promise<boolean>;
   executeJavaScript: (code: string) => Promise<unknown>;
   getURL: () => string | Promise<string>;
   show: () => void;

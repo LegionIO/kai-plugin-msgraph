@@ -1,3 +1,4 @@
+import { withMfaActivity } from './MfaActivity';
 import React from 'react';
 import { PanelView as TeamsPanel } from './components/PanelView.tsx';
 import { MailPanelView } from './components/MailPanelView.tsx';
@@ -31,7 +32,7 @@ export function register(env: {
 }) {
   (globalThis as Record<string, unknown>).React = env.React;
   env.registerComponents('msgraph', {
-    PanelView,
-    SettingsView,
+    PanelView: withMfaActivity(PanelView),
+    SettingsView: withMfaActivity(SettingsView, true),
   });
 }

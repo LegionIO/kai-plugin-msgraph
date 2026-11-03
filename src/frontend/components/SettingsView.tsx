@@ -343,7 +343,7 @@ export function SettingsView({ pluginState, pluginConfig, onAction }: Props) {
 
       <Section title="Auto-login credentials">
         <p className="text-xs text-muted-foreground">
-          Optional. When saved, the sign-in window is filled automatically (including MFA prompts). Stored via{' '}
+          Optional. Saved credentials are submitted automatically. MFA waits for activity using the settings below. Stored via{' '}
           {s.credentials?.encryptionMethod === 'os-keychain' ? 'OS keychain' : 'AES-256-GCM (local key)'}.
         </p>
         <div className="flex gap-2 mt-3">

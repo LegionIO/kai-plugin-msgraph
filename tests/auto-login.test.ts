@@ -131,3 +131,36 @@ test('push timeout reveals the same window for manual completion', async (t) => 
   t.mock.timers.tick(120_000); await flush();
   assert.equal((await result).fallbackToManual, true); assert.equal(f.shown(), 1);
 });
+
+test('inactive credential submission proceeds but MFA waits for activity', async () => {
+  const f = fixture('username');
+  let resume!: (value: boolean) => void;
+  const gate = new Promise<boolean>(resolve => { resume = resolve; });
+  const result = performAutoLogin({ ...f.helpers, waitForMfaActivity: () => gate }, credentials, f.callbacks);
+  await flush();
+  assert.equal(f.submits(), 1);
+  assert.deepEqual(f.approvals, []);
+  assert.equal(f.shown(), 0);
+  resume(true);
+  assert.equal((await result).success, true);
+  assert.equal(f.approvals.length, 1);
+});
+
+test('cached code and push challenges wait, and closing them does not reveal a fallback', async () => {
+  for (const stage of ['sms', 'totp', 'push']) {
+    const f = fixture(stage);
+    const result = await performAutoLogin({ ...f.helpers, waitForMfaActivity: async () => false }, credentials, f.callbacks);
+    assert.equal(result.success, false);
+    assert.equal(result.fallbackToManual, false);
+    assert.deepEqual(f.approvals, []);
+    assert.deepEqual(f.codes, []);
+    assert.equal(f.shown(), 0);
+  }
+});
+
+test('MFA completion while waiting is detected without showing an obsolete challenge', async () => {
+  const f = fixture('push');
+  const result = await performAutoLogin({ ...f.helpers, waitForMfaActivity: async () => { f.page('complete'); return true; } }, credentials, f.callbacks);
+  assert.equal(result.success, true);
+  assert.deepEqual(f.approvals, []);
+});

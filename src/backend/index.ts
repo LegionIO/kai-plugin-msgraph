@@ -1,3 +1,4 @@
+import { createMfaActivityGuard } from './mfa-activity.js';
 import { withRequestContext, withNewRequestContext, coalesceRefresh, disposeScheduler, throttleWaitSeconds, preventsFallback } from './request-scheduler.js';
 import {
   acquireTokenInteractive,
@@ -73,6 +74,8 @@ import type {
 } from '../shared/types.js';
 import { DEFAULT_TOOL_PERMISSIONS } from '../shared/types.js';
 import { resolveTrackedSystemEvents, type TrackedSystemEvents } from '../shared/system-events.js';
+
+let disposeMfaActivity: (() => void) | undefined;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -1594,6 +1597,11 @@ function resumeSessionOnce(api: PluginAPI): void {
 // ── Lifecycle ──
 
 export async function activate(api: PluginAPI): Promise<void> {
+  disposeMfaActivity?.();
+  const mfaGuard = createMfaActivityGuard(api);
+  api = mfaGuard.api;
+  disposeMfaActivity = mfaGuard.dispose;
+
   schedulerApi = api;
   setLogger(api.log);
   const log = getLogger();
@@ -1850,6 +1858,9 @@ export async function activate(api: PluginAPI): Promise<void> {
 }
 
 export async function deactivate(): Promise<void> {
+  disposeMfaActivity?.();
+  disposeMfaActivity = undefined;
+
   if (schedulerApi) { disposeScheduler(schedulerApi); schedulerApi = null; }
   // Set first: any in-flight async continuation (startup IIFE, refreshTick,
   // poll) re-checks this via isTornDown() before writing to api.state.
