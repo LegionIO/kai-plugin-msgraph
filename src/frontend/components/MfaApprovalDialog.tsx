@@ -1,5 +1,7 @@
 import React from 'react';
 
+import { useMfaWindowFocus } from '../MfaActivity';
+
 type MfaApprovalDialogProps = {
   approvalNumber: string | null;
   onShow: () => void;
@@ -7,6 +9,7 @@ type MfaApprovalDialogProps = {
 };
 
 export function MfaApprovalDialog({ approvalNumber, onShow, onCancel }: MfaApprovalDialogProps) {
+  useMfaWindowFocus();
   return (
     <div role="dialog" aria-modal="true" aria-label="Approve Microsoft sign-in" className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div className="bg-card rounded-xl shadow-2xl w-full max-w-sm p-6 border border-border text-center">

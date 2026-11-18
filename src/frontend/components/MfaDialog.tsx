@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 
+import { useMfaWindowFocus } from '../MfaActivity';
+
 type MfaDialogProps = {
   type: 'sms' | 'totp';
   onSubmit: (code: string) => void;
@@ -7,6 +9,7 @@ type MfaDialogProps = {
 };
 
 export function MfaDialog({ type, onSubmit, onCancel }: MfaDialogProps) {
+  useMfaWindowFocus();
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const submit = () => {

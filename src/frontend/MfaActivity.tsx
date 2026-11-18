@@ -1,5 +1,24 @@
 import React, { useEffect, useRef } from 'react';
 
+declare global {
+  interface Window {
+    app?: { plugins?: { focusWindow?: () => Promise<void> } };
+  }
+}
+
+/** Focus once per displayed challenge, including React StrictMode's effect replay. */
+export function useMfaWindowFocus() {
+  const requested = useRef(false);
+  useEffect(() => {
+    if (requested.current) return;
+    requested.current = true;
+    void window.app?.plugins?.focusWindow?.().catch(error => {
+      console.warn('[MFA] Could not focus Kai:', error);
+    });
+  }, []);
+}
+
+
 /** Only actual input counts; mounting a panel, polling, and focus alone do not. */
 export function withMfaActivity(Component: React.ComponentType<any>, settings = false) {
   return function MfaActivityView(props: any) {
