@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 
 export type PluginComponentProps<
   TState = Record<string, unknown>,
@@ -13,18 +13,29 @@ export type PluginComponentProps<
   props?: Record<string, unknown>;
 };
 
-/**
- * Kai renders plugin panels inside a host that is itself the scroll container,
- * so `h-full` grows with content instead of constraining it. This hook measures
- * the available height (from the panel's top to the bottom of the nearest
- * scrollable ancestor) and returns a pixel value to pin the root to, so inner
- * `overflow-y-auto` columns can scroll independently.
- */
-export function usePanelHeight(min = 320): [React.RefObject<HTMLDivElement | null>, number | null] {
-  const ref = useRef<HTMLDivElement>(null);
-  const [height, setHeight] = useState<number | null>(null);
+export function measurePanelHeight(panel: HTMLElement, scrollParent: HTMLElement | null): number {
+  const rect = panel.getBoundingClientRect();
+  if (!scrollParent) return Math.max(0, Math.floor(window.innerHeight - rect.top));
 
-  useEffect(() => {
+  // Use the unscrolled position; otherwise host scrolling makes the panel grow.
+  const top = rect.top - scrollParent.getBoundingClientRect().top
+    - scrollParent.clientTop + scrollParent.scrollTop;
+  let bottomInset = Number.parseFloat(window.getComputedStyle(scrollParent).paddingBottom) || 0;
+  for (let p = panel.parentElement; p && p !== scrollParent; p = p.parentElement) {
+    const style = window.getComputedStyle(p);
+    bottomInset += (Number.parseFloat(style.paddingBottom) || 0)
+      + (Number.parseFloat(style.borderBottomWidth) || 0)
+      + (Number.parseFloat(style.marginBottom) || 0);
+  }
+  return Math.max(0, Math.floor(scrollParent.clientHeight - top - bottomInset));
+}
+
+/** Constrain the whole plugin, including navigation, inside Kai's scrolling host. */
+export function usePanelHeight(): [React.RefObject<HTMLDivElement | null>, number] {
+  const ref = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState(0);
+
+  useLayoutEffect(() => {
     const panel = ref.current;
     if (!panel || typeof window === 'undefined') return;
 
@@ -39,26 +50,22 @@ export function usePanelHeight(min = 320): [React.RefObject<HTMLDivElement | nul
     };
 
     const scrollParent = findScrollParent();
-    const measure = () => {
-      const rect = panel.getBoundingClientRect();
-      const parentRect = scrollParent?.getBoundingClientRect();
-      const parentStyle = scrollParent ? window.getComputedStyle(scrollParent) : null;
-      const parentBottom = parentRect?.bottom ?? window.innerHeight;
-      const padBottom = parentStyle ? Number.parseFloat(parentStyle.paddingBottom) || 0 : 0;
-      setHeight(Math.max(min, Math.floor(parentBottom - rect.top - padBottom)));
-    };
+    const measure = () => setHeight(measurePanelHeight(panel, scrollParent));
 
     measure();
     window.addEventListener('resize', measure);
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
     ro?.observe(panel);
-    if (scrollParent) ro?.observe(scrollParent);
+    for (let p = panel.parentElement; p; p = p.parentElement) {
+      ro?.observe(p);
+      if (p === scrollParent) break;
+    }
 
     return () => {
       window.removeEventListener('resize', measure);
       ro?.disconnect();
     };
-  }, [min]);
+  }, []);
 
   return [ref, height];
 }

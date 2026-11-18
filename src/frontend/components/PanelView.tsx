@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect, useRef, useLayoutEffect } from 'react';
 import type { PluginComponentProps } from '../hooks.ts';
-import { usePanelHeight } from '../hooks.ts';
+import { TokenExpiry } from './TokenExpiry.tsx';
 import type { MsgraphPluginState, NormalizedChat, NormalizedMessage, Presence, BodySegment } from '../../shared/types.ts';
 import { AuthFeedback, SignInButton } from './AuthFeedback.tsx';
 import { Avatar, AvatarStack } from './Avatar.tsx';
@@ -15,7 +15,7 @@ import { AdaptiveCard, type CardInvokeRequest } from './AdaptiveCard.tsx';
 import { ForwardDialog } from './ForwardDialog.tsx';
 import { TaskModuleDialog } from './TaskModuleDialog.tsx';
 
-type Props = PluginComponentProps<MsgraphPluginState>;
+type Props = PluginComponentProps<MsgraphPluginState> & { panelHeight?: number };
 
 function ReactionChip({
   r,
@@ -94,7 +94,7 @@ function chatTitle(c: NormalizedChat): string {
   return c.type === 'group' ? 'Group chat' : 'Chat';
 }
 
-export function PanelView({ pluginState, onAction }: Props) {
+export function PanelView({ pluginState, onAction, panelHeight }: Props) {
   useEffect(ensureSyntaxThemeInjected, []);
   const s = pluginState ?? ({} as MsgraphPluginState);
   const photos = s.photos ?? {};
@@ -111,7 +111,6 @@ export function PanelView({ pluginState, onAction }: Props) {
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const [panelRef, panelHeight] = usePanelHeight();
 
   const activeTyping = s.activeChatId ? s.typing?.[s.activeChatId] ?? null : null;
   const activeReceipts = s.activeChatId ? s.readReceipts?.[s.activeChatId] ?? null : null;
@@ -277,9 +276,7 @@ export function PanelView({ pluginState, onAction }: Props) {
   if (!s.auth?.isAuthenticated) {
     return (
       <div
-        ref={panelRef}
-        style={panelHeight ? { height: panelHeight } : undefined}
-        className="flex flex-col items-center justify-center gap-3 p-6 text-center overflow-hidden"
+        className="h-full flex flex-col items-center justify-center gap-3 p-6 text-center overflow-y-auto"
       >
         <div className="w-12 h-12 rounded-xl bg-primary/15 flex items-center justify-center">
           <svg className="w-6 h-6 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -306,9 +303,7 @@ export function PanelView({ pluginState, onAction }: Props) {
 
   return (
     <div
-      ref={panelRef}
-      style={panelHeight ? { height: panelHeight } : undefined}
-      className="relative flex flex-col min-h-0 overflow-hidden"
+      className="relative h-full flex flex-col min-h-0 overflow-hidden"
     >
       {/* Top bar */}
       <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2 shrink-0">
@@ -332,6 +327,7 @@ export function PanelView({ pluginState, onAction }: Props) {
                 : '#8a8886',
             }}
           />
+          <TokenExpiry expiresAt={s.auth.accessTokenExpiresAt} />
           <button
             type="button"
             title="Refresh"

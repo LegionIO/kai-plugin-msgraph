@@ -40,6 +40,8 @@ export interface AuthStatus {
   objectId: string | null;
   jobTitle: string | null;
   minutesRemaining: number | null;
+  /** Current access token deadline in epoch milliseconds; silent refresh can extend it. */
+  accessTokenExpiresAt: number | null;
   autoLoginStatus: string | null;
   isSigningIn: boolean;
   error: string | null;

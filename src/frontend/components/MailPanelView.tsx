@@ -1,7 +1,7 @@
 import { AuthFeedback, SignInButton } from './AuthFeedback.tsx';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { PluginComponentProps } from '../hooks.ts';
-import { usePanelHeight } from '../hooks.ts';
+import { TokenExpiry } from './TokenExpiry.tsx';
 import type { MsgraphPluginState, NormalizedMailSummary, MailFolder } from '../../shared/types.ts';
 import { MailBody } from './MailBody.tsx';
 import { MailComposeDialog } from './MailComposeDialog.tsx';
@@ -36,7 +36,6 @@ function fmtFull(iso: string | null): string {
 
 export function MailPanelView({ pluginState, onAction }: Props) {
   const s = pluginState ?? ({} as MsgraphPluginState);
-  const [panelRef, panelHeight] = usePanelHeight();
   const [search, setSearch] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ folder: MailFolder; x: number; y: number } | null>(null);
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -64,7 +63,7 @@ export function MailPanelView({ pluginState, onAction }: Props) {
 
   if (!s.auth?.isAuthenticated) {
     return (
-      <div ref={panelRef} className="flex flex-col items-center justify-center gap-4 p-10 text-center" style={panelHeight ? { height: panelHeight } : undefined}>
+      <div className="h-full flex flex-col items-center justify-center gap-4 p-10 text-center overflow-y-auto">
         <div className="text-sm font-medium text-foreground">Outlook</div>
         <p className="text-xs text-muted-foreground max-w-xs">
           Uses the same Microsoft sign-in as the Teams panel.
@@ -76,12 +75,13 @@ export function MailPanelView({ pluginState, onAction }: Props) {
   }
 
   return (
-    <div ref={panelRef} className="flex flex-col text-foreground" style={panelHeight ? { height: panelHeight } : undefined}>
+    <div className="h-full min-h-0 overflow-hidden flex flex-col text-foreground">
       <AuthFeedback state={s} onAction={onAction} />
       {/* Top bar */}
       <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2 shrink-0">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-foreground">Outlook</h2>
+          <TokenExpiry expiresAt={s.auth.accessTokenExpiresAt} />
           <button
             type="button"
             title="Refresh"

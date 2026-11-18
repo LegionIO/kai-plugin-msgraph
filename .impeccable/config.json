@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "src/frontend/components/PanelView.tsx"
+        ],
+        "createdAt": "2026-11-18T22:58:17.017Z",
+        "reason": "Agent review: both border-l-2 occurrences are pre-existing forwarded-message and reply quotation markers (m.forwarded and m.replyTo), confirmed in HEAD; they distinguish quoted content from the current message, not decorative card accents."
+      }
+    ]
+  }
+}
